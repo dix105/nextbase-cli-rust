@@ -1,0 +1,24 @@
+[package]
+name = "nextbase-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nextbase"
+path = "src/bin/nextbase.rs"
+
+[[bin]]
+name = "wisper"
+path = "src/bin/wisper.rs"
+
+[dependencies]
+nextbase-core = { path = "../nextbase-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+inquire = "0.7"
+indicatif = "0.17"
+owo-colors = "4"
+anstream = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
