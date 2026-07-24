@@ -4,7 +4,8 @@ use nextbase_core::config::{
     self, Provider, DEFAULT_DUCKING_VOLUME, DEFAULT_POLISH_MODEL, DEFAULT_POLISH_SHORTCUT,
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
-use nextbase_core::{log, shortcut, storage, verify};
+use nextbase_core::polish::{self, RewriteMode};
+use nextbase_core::{log, shortcut, storage, transcribe, verify};
 use std::io::IsTerminal;
 
 use crate::ui;
@@ -221,11 +222,32 @@ pub async fn polish(args: &[String]) -> Result<()> {
             ui::hint("Restart the listener to pick it up: wisper restart");
             Ok(())
         }
-        _ => Err(not_yet("wisper polish \"text\"", "phase 1: providers")),
+        _ => {
+            // `polish <mode> "text"` or just `polish "text"`, matching the
+            // existing CLI: an unrecognised first word is part of the text.
+            let (mode, words) = match RewriteMode::from_name(&action) {
+                Some(mode) => (mode, &args[1..]),
+                None => (RewriteMode::Polish, args),
+            };
+            let text = words.join(" ").trim().to_string();
+            if text.is_empty() {
+                bail!("Usage: wisper polish \"text\" or wisper polish on|off|status|shortcut");
+            }
+            rewrite_and_print(&text, mode).await
+        }
     }
 }
 
-pub fn spell(args: &[String]) -> Result<()> {
+async fn rewrite_and_print(text: &str, mode: RewriteMode) -> Result<()> {
+    let config = config::load();
+    let bar = ui::spinner("Rewriting...");
+    let result = polish::rewrite_text(text, &config, mode).await;
+    bar.finish_and_clear();
+    anstream::println!("{}", result?);
+    Ok(())
+}
+
+pub async fn spell(args: &[String]) -> Result<()> {
     let action = args.first().map(|a| a.to_lowercase()).unwrap_or_default();
 
     match action.as_str() {
@@ -244,7 +266,13 @@ pub fn spell(args: &[String]) -> Result<()> {
             };
             store_shortcut("spell", &value)
         }
-        _ => Err(not_yet("wisper spell \"text\"", "phase 1: providers")),
+        _ => {
+            let text = args.join(" ").trim().to_string();
+            if text.is_empty() {
+                bail!("Usage: wisper spell \"text\" or wisper spell shortcut [key]");
+            }
+            rewrite_and_print(&text, RewriteMode::Spell).await
+        }
     }
 }
 
@@ -441,8 +469,30 @@ pub async fn setup(update_mode: bool) -> Result<()> {
 
 // ---------------------------------------------------------------- not yet
 
-pub fn transcribe(_file: &str) -> Result<()> {
-    Err(not_yet("wisper transcribe", "phase 1: providers"))
+pub async fn transcribe(file: &str) -> Result<()> {
+    let path = std::path::Path::new(file);
+    if !path.is_file() {
+        bail!("Audio file not found: {file}");
+    }
+
+    let config = config::load();
+    let provider = config
+        .provider
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "provider".to_string());
+
+    let bar = ui::spinner(&format!("Transcribing with {provider}..."));
+    let result = transcribe::transcribe_file(path, &config).await;
+    bar.finish_and_clear();
+
+    let text = result?;
+    if text.is_empty() {
+        bail!("Empty transcript returned.");
+    }
+
+    storage::save_transcript(&text, file)?;
+    anstream::println!("{text}");
+    Ok(())
 }
 
 pub fn media(_args: &[String]) -> Result<()> {

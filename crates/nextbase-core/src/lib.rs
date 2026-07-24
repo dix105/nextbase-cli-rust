@@ -7,6 +7,8 @@
 pub mod config;
 pub mod log;
 pub mod paths;
+pub mod polish;
 pub mod shortcut;
 pub mod storage;
+pub mod transcribe;
 pub mod verify;

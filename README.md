@@ -44,6 +44,19 @@ Two rules worth keeping:
   register used to reach config and then throw at every listener start — which
   autostart turned into a silent restart loop.
 
+## Providers
+
+All four are supported through their direct endpoints: Groq Whisper, ElevenLabs
+Scribe, Sarvam, and the Nextbase Codex gateway.
+
+Sarvam's Batch job API — upload, poll, download, speaker diarization — is **not**
+here on purpose. It exists to handle hour-long meeting recordings, which is
+NoteBot's job. Wisper records hold-to-talk clips of a few seconds. If a long file
+is passed to `wisper transcribe` on Sarvam and a Groq key is present, it falls back
+to Groq Whisper; otherwise it says so and points at `wisper provider`. Only
+duration-related errors trigger that fallback, so an auth failure still surfaces as
+an auth failure.
+
 ## Terminal UX
 
 - `inquire` for the setup wizard — sequential prompts that stay in scrollback, and
@@ -59,8 +72,8 @@ Two rules worth keeping:
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Workspace, clap surface, config/storage/log, shortcut logic + tests, setup wizard, `status`/`shortcuts`/`history`/`add`/`logs`/`shortcut`/`provider` | **done** |
-| 1 | Providers via `reqwest`: `transcribe`, `polish`, `spell` text, Sarvam REST → Batch → chunk → Groq ladder | next |
-| 2 | Audio: `cpal` capture + `hound` WAV, level metering, `mic` / `mic --auto` | |
+| 1 | All four providers via `reqwest`: `transcribe`, `polish`/`spell` text rewriting | **done** |
+| 2 | Audio: `cpal` capture + `hound` WAV, level metering, `mic` / `mic --auto` | next |
 | 3 | macOS hotkeys (CGEventTap, incl. modifier-only) + paste (`arboard` + CGEvent) → full `listen` | |
 | 4 | Autostart (launchd) + single-instance process state | |
 | 5 | Web dashboard (`axum`, HTML via `include_str!`) | |
@@ -76,7 +89,7 @@ Port behaviour, don't reinvent it. These encode real field fixes:
 
 - the shortcut normalization tables (`Cmd`/`Command`/`Win`/`Window` → `META`, and
   `CommandOrControl` following the platform)
-- the Sarvam routing ladder for long audio
+- `saarika:v2` → `saarika:v2.5`, so old configs keep working
 - silent-recording and dead-microphone detection
 - the platform-quirk comments in the TypeScript source
 
