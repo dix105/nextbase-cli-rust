@@ -19,15 +19,19 @@ use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
 };
-use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
-use windows::Win32::Media::Multimedia::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
-use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
 /// 100-nanosecond units, which is what WASAPI buffer durations are measured in.
 const REFTIMES_PER_SEC: i64 = 10_000_000;
+
+// Format tags from mmreg.h. Spelled out rather than imported because windows-rs moves
+// them between modules and gates them behind different features between releases —
+// these are fixed ABI values, so a literal is the stable way to name them.
+const WAVE_FORMAT_PCM: u32 = 0x0001;
+const WAVE_FORMAT_IEEE_FLOAT: u32 = 0x0003;
+const WAVE_FORMAT_EXTENSIBLE: u32 = 0xFFFE;
 
 fn initialise_com() {
     unsafe {
@@ -50,26 +54,33 @@ fn default_render_device() -> Result<windows::Win32::Media::Audio::IMMDevice> {
 }
 
 /// The playback device system audio would be captured from, for `doctor`.
+///
+/// Confirming the device exists is the part that matters; its human-readable name is
+/// a nicety, so a failure to read the name degrades to a generic label rather than
+/// making the whole check look broken.
 pub(crate) fn render_device_name() -> Result<String> {
-    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-
     let device = default_render_device()?;
+    Ok(friendly_name(&device).unwrap_or_else(|| "Default playback device".to_string()))
+}
+
+fn friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+    use windows::Win32::System::Com::STGM_READ;
+
     unsafe {
-        let store = device
-            .OpenPropertyStore(STGM_READ)
-            .context("Could not read playback device properties")?;
-        let mut value = store
-            .GetValue(&PKEY_Device_FriendlyName)
-            .context("Could not read the playback device name")?;
+        let store = device.OpenPropertyStore(STGM_READ).ok()?;
+        let mut value = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
         let name = value
             .Anonymous
             .Anonymous
             .Anonymous
             .pwszVal
             .to_string()
-            .unwrap_or_else(|_| "Default playback device".to_string());
+            .ok()
+            .filter(|name| !name.trim().is_empty());
         let _ = PropVariantClear(&mut value);
-        Ok(name)
+        name
     }
 }
 
@@ -191,10 +202,9 @@ pub(crate) fn start() -> Result<SourceHandle> {
         let mut mono: Vec<f32> = Vec::new();
         while !thread_stop.load(Ordering::SeqCst) {
             unsafe {
-                let mut available = 0u32;
-                if capture.GetNextPacketSize(&mut available).is_err() {
+                let Ok(available) = capture.GetNextPacketSize() else {
                     break;
-                }
+                };
                 if available == 0 {
                     // Nothing playing: loopback simply goes quiet, so poll rather
                     // than block, and let the mixer pad with silence.
