@@ -126,8 +126,24 @@ nbmeet setup     # paste a Sarvam key (transcription) and a Groq key (summaries)
 nbmeet doctor    # microphone, system audio, permissions, keys
 nbmeet start     # record
 nbmeet stop      # stop, transcribe, summarise
+nbmeet audio <f> # transcribe a file or URL you already have
 nbmeet open      # dashboard, with start and stop buttons
 ```
+
+### Audio you already have
+
+```bash
+nbmeet audio ~/Downloads/standup.m4a
+nbmeet audio https://example.com/recording.mp3
+```
+
+The **original bytes** go to Sarvam — it accepts mp3, m4a, flac, ogg, opus and webm
+natively, so re-encoding before upload would only add a conversion step to blame for a
+bad transcript. The sample gate needs a WAV to cut three minutes from, so for other
+formats `ffmpeg` makes a copy *for that alone*; without `ffmpeg` the gate is skipped and
+says so rather than silently transcoding.
+
+The dashboard has the same field, and takes either a local path or a URL.
 
 Four files land in `~/.nextbase/meetings/<id>/`: `meeting-note.md`,
 `full-diarized-transcript.md`, `full-transcript.txt` and `processing-metadata.json`.

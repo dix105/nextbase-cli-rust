@@ -79,6 +79,47 @@ async fn meeting() -> impl IntoResponse {
     }))
 }
 
+/// Past meetings, newest first, with what each produced.
+async fn meeting_history() -> impl IntoResponse {
+    let Ok(entries) = std::fs::read_dir(paths::meetings_dir()) else {
+        return Json(json!([]));
+    };
+
+    let mut directories: Vec<std::path::PathBuf> =
+        entries.flatten().map(|entry| entry.path()).collect();
+    directories.sort();
+    directories.reverse();
+
+    let meetings: Vec<serde_json::Value> = directories
+        .into_iter()
+        .take(50)
+        .map(|directory| {
+            let id = directory
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let note = directory.join("meeting-note.md");
+            let title = std::fs::read_to_string(&note).ok().and_then(|body| {
+                body.lines()
+                    .next()
+                    .map(|line| line.trim_start_matches('#').trim().to_string())
+            });
+            let audio = nextbase_meeting::pipeline::recorded_audio(&directory);
+
+            json!({
+                "id": id,
+                "title": title,
+                "transcribed": note.is_file(),
+                "directory": directory.display().to_string(),
+                "seconds": audio.as_ref().and_then(|path| wav::info(path).ok())
+                    .map(|info| info.duration_seconds()),
+            })
+        })
+        .collect();
+
+    Json(json!(meetings))
+}
+
 fn unfinished_count() -> usize {
     nextbase_meeting::pipeline::resumable().len()
 }
@@ -135,6 +176,53 @@ async fn stop_meeting() -> impl IntoResponse {
             }))
         }
         Err(error) => problem(StatusCode::BAD_REQUEST, &error.to_string()),
+    }
+}
+
+/// Import a local file or a remote URL and transcribe it.
+///
+/// The work is handed to a detached `nbmeet audio` for the same reason as stop: a
+/// download plus a queued Batch job is far too long to hold an HTTP request open.
+async fn import_audio(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let Some(source) = body
+        .get("source")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+    else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "Give a file path or an http(s) URL.",
+        );
+    };
+
+    if let Err(error) = nextbase_meeting::check_ready() {
+        return problem(StatusCode::BAD_REQUEST, &error.to_string());
+    }
+    if let Some(active) = meeting_state::load() {
+        if active.phase.is_capturing() || active.phase.is_processing() {
+            return problem(
+                StatusCode::CONFLICT,
+                &format!("Meeting {} is {}.", active.id, active.phase),
+            );
+        }
+    }
+    if config::load().meeting_consent != Some(true) {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "Run `nbmeet start` or `nbmeet audio` in a terminal once to confirm that audio is uploaded for transcription.",
+        );
+    }
+    // A local path is resolved by the spawned process, which shares this machine — but
+    // reject a path that does not exist now, so the error arrives in the browser rather
+    // than only in the log.
+    if !nextbase_core::import::is_remote(source) && !std::path::Path::new(source).is_file() {
+        return problem(StatusCode::BAD_REQUEST, &format!("No file at {source}"));
+    }
+
+    match autostart::spawn_sibling_detached("nbmeet", &["audio", source]) {
+        Ok(_) => ok(json!({"source": source})),
+        Err(error) => problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
 
@@ -196,8 +284,10 @@ pub async fn serve(port: u16) -> Result<String> {
         .route("/api/state", get(state))
         .route("/api/history/{id}", delete(delete_transcript))
         .route("/api/meeting", get(meeting))
+        .route("/api/meeting/history", get(meeting_history))
         .route("/api/meeting/start", post(start_meeting))
         .route("/api/meeting/stop", post(stop_meeting))
+        .route("/api/meeting/audio", post(import_audio))
         .route("/api/meeting/approve/{mode}", post(approve_meeting))
         .route("/api/meeting/reject", post(reject_meeting));
 

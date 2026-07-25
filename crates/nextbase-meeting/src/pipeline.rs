@@ -79,10 +79,15 @@ pub async fn run_sample_gate(
     config: &Config,
     progress: Progress<'_>,
 ) -> Result<SampleReport> {
+    if let Some(reason) = &meeting.gate_blocked {
+        bail!("{reason}");
+    }
+    // An imported mp3 goes to the provider untouched, but a sample has to be cut from a
+    // WAV, so this is not always the same file that gets uploaded.
     let audio = meeting
-        .audio_path
-        .clone()
-        .context("This meeting has no recorded audio.")?;
+        .sampleable()
+        .cloned()
+        .context("This meeting has no audio a sample can be cut from.")?;
     let key = sarvam_key(config)?;
 
     let window = wav::pick_energy_window(&audio, SAMPLE_LENGTH, SAMPLE_SKIP)
@@ -167,6 +172,16 @@ pub async fn run_sample_gate(
 /// The limits are 2 hours per file and 20 files per job, so anything past 40 hours
 /// cannot go through in one job — say so rather than submitting a doomed request.
 pub fn prepare_inputs(audio: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
+    // Splitting is sample-exact WAV work. An imported mp3 or m4a is submitted whole and
+    // the provider enforces its own 2 hour limit — better than a silent re-encode.
+    let is_wav = audio
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false);
+    if !is_wav {
+        return Ok(vec![audio.to_path_buf()]);
+    }
+
     let parts = wav::split(audio, directory, MAX_FILE_DURATION)?;
     if parts.len() > MAX_FILES_PER_JOB {
         bail!(
@@ -202,6 +217,33 @@ pub async fn run_full_transcription(
     sarvam_batch::submit_with_retry(&parts, key, &options(config, mode), progress).await
 }
 
+/// Header facts about the audio, for the deliverables.
+///
+/// An imported mp3 has no readable WAV header. Rather than failing a completed
+/// transcription over metadata, the duration falls back to what the state file recorded
+/// and unknown fields stay zero — which `coverage_fraction` already treats as "unknown"
+/// rather than as a coverage failure.
+fn audio_details(meeting: &ActiveMeeting) -> wav::WavInfo {
+    if let Some(path) = meeting.audio_path.as_ref() {
+        if let Ok(info) = wav::info(path) {
+            return info;
+        }
+    }
+    if let Some(path) = meeting.sample_source.as_ref() {
+        if let Ok(info) = wav::info(path) {
+            return info;
+        }
+    }
+
+    let seconds = meeting.duration_seconds.unwrap_or(0.0);
+    wav::WavInfo {
+        sample_rate: wav::TARGET_SAMPLE_RATE,
+        channels: 1,
+        bits_per_sample: 16,
+        frames: (seconds * wav::TARGET_SAMPLE_RATE as f64) as u64,
+    }
+}
+
 /// What finishing a meeting produced.
 pub struct Completed {
     pub transcription: Transcription,
@@ -234,12 +276,7 @@ pub async fn finish(
 
     // The transcript exists now, so save it before summarising: a Groq failure must
     // not cost the user the transcription they already paid for.
-    let audio_info = wav::info(
-        meeting
-            .audio_path
-            .as_ref()
-            .context("This meeting has no recorded audio.")?,
-    )?;
+    let audio_info = audio_details(meeting);
 
     state::update(|active| active.phase = Phase::Summarising)?;
     let analysis = if crate::has_summary_key() {
@@ -292,6 +329,8 @@ pub async fn finish(
 fn clean_intermediates(meeting: &ActiveMeeting) {
     let directory = meeting.directory();
     let _ = std::fs::remove_file(directory.join("sample.wav"));
+    // Only ever a derived copy for the gate; the uploaded original stays.
+    let _ = std::fs::remove_file(directory.join("sample-source.wav"));
 
     let Ok(entries) = std::fs::read_dir(&directory) else {
         return;
@@ -302,6 +341,18 @@ fn clean_intermediates(meeting: &ActiveMeeting) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// The audio file in a meeting directory, whatever extension it landed with.
+///
+/// Recordings are always `audio.wav`, but an import keeps its own container.
+pub fn recorded_audio(directory: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(directory).ok()?;
+    entries.flatten().map(|entry| entry.path()).find(|path| {
+        path.file_stem()
+            .map(|stem| stem.eq_ignore_ascii_case("audio"))
+            .unwrap_or(false)
+    })
 }
 
 /// Meetings that were recorded but never finished, newest first.
@@ -321,7 +372,7 @@ pub fn resumable() -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.join("audio.wav").is_file())
+        .filter(|path| recorded_audio(path).is_some())
         .filter(|path| !path.join("meeting-note.md").is_file())
         .filter(|path| {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string());

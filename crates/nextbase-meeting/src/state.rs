@@ -117,6 +117,18 @@ pub struct ActiveMeeting {
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_path: Option<PathBuf>,
+    /// A WAV the sample gate can cut from, when `audio_path` is not one itself.
+    ///
+    /// An imported mp3 or m4a goes to the provider untouched, but slicing a sample out
+    /// of it needs a WAV, so one is made alongside purely for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_source: Option<PathBuf>,
+    /// Set when the sample gate cannot run for this meeting, with the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_blocked: Option<String>,
+    /// True when the audio was imported rather than recorded here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorder_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +164,9 @@ impl ActiveMeeting {
             phase: Phase::Starting,
             started_at: chrono::Utc::now().to_rfc3339(),
             audio_path: None,
+            sample_source: None,
+            gate_blocked: None,
+            imported: false,
             recorder_pid: None,
             duration_seconds: None,
             sample: None,
@@ -164,6 +179,11 @@ impl ActiveMeeting {
 
     pub fn directory(&self) -> PathBuf {
         paths::meeting_dir(&self.id)
+    }
+
+    /// The file the sample gate should cut from, if any can be.
+    pub fn sampleable(&self) -> Option<&PathBuf> {
+        self.sample_source.as_ref().or(self.audio_path.as_ref())
     }
 
     pub fn elapsed_seconds(&self) -> f64 {

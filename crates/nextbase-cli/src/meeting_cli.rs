@@ -58,6 +58,12 @@ pub enum MeetingCommand {
     },
     /// Discard a meeting waiting for approval
     Reject,
+    /// Transcribe an existing recording: a local file, or a remote URL
+    Audio {
+        /// Path or http(s) URL
+        #[arg(trailing_var_arg = true)]
+        source: Vec<String>,
+    },
     /// Finish a meeting that was recorded but never transcribed
     Process {
         /// Meeting id. Omit for the most recent unfinished one.
@@ -89,6 +95,7 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::Status) => status(),
         Some(MeetingCommand::Approve { mode }) => approve(mode.as_deref()).await,
         Some(MeetingCommand::Reject) => reject(),
+        Some(MeetingCommand::Audio { source }) => audio(&source.join(" ")).await,
         Some(MeetingCommand::Process { id }) => process(id.as_deref()).await,
         Some(MeetingCommand::History { limit }) => history(limit),
         Some(MeetingCommand::Doctor) => doctor(),
@@ -116,6 +123,7 @@ fn overview() -> Result<()> {
     ui::info("nbmeet stop       Stop, transcribe, summarise");
     ui::info("nbmeet doctor     Check microphone, system audio and keys");
     ui::info("nbmeet history    Past meetings");
+    ui::info("nbmeet audio <f>  Transcribe a file or URL you already have");
     ui::info("nbmeet open       Dashboard, with start and stop buttons");
     println!();
     ui::hint("Full list: nbmeet --help");
@@ -396,6 +404,18 @@ async fn stop() -> Result<()> {
 /// The gate, then the full run.
 async fn transcribe_and_finish(meeting: &state::ActiveMeeting) -> Result<()> {
     let settings = config::load();
+
+    if let Some(reason) = &meeting.gate_blocked {
+        ui::warn(reason);
+        ui::hint("Install ffmpeg to enable the sample check for non-WAV files.");
+        let mode = settings
+            .meeting_mode
+            .as_deref()
+            .and_then(Mode::from_name)
+            .unwrap_or(Mode::Transcribe);
+        ui::info(&format!("Transcribing in `{mode}` mode."));
+        return run_full(meeting, mode).await;
+    }
 
     if !settings.meeting_gate_enabled() {
         let mode = settings
@@ -725,6 +745,69 @@ fn status() -> Result<()> {
     Ok(())
 }
 
+/// Transcribe audio that already exists, local or remote.
+async fn audio(source: &str) -> Result<()> {
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("Usage: nbmeet audio <path-or-url>");
+    }
+    nextbase_meeting::check_ready()?;
+
+    if let Some(existing) = state::load() {
+        if existing.phase.is_capturing() || existing.phase.is_processing() {
+            bail!(
+                "Meeting {} is {}. Wait for it, or stop it first.",
+                existing.id,
+                existing.phase
+            );
+        }
+    }
+
+    // Uploading someone's recording is the same decision as recording one.
+    if !confirm_upload(false)? {
+        return Ok(());
+    }
+
+    let id = nextbase_meeting::new_meeting_id();
+    let directory = paths::meeting_dir(&id);
+
+    let bar = ui::spinner(if nextbase_core::import::is_remote(source) {
+        "Downloading the audio..."
+    } else {
+        "Copying the audio..."
+    });
+    let imported = nextbase_core::import::prepare(source, &directory).await;
+    bar.finish_and_clear();
+    let imported = imported?;
+
+    let mut meeting = state::ActiveMeeting::new(&id);
+    meeting.phase = Phase::Recorded;
+    meeting.audio_path = Some(imported.audio.clone());
+    meeting.sample_source = imported.sampleable.clone();
+    meeting.gate_blocked = imported.gate_blocked.clone();
+    meeting.imported = true;
+    // Duration comes from the header when it is a WAV; otherwise the provider's
+    // timestamps are the only measure, and the note says the duration is unknown.
+    meeting.duration_seconds = imported
+        .sampleable
+        .as_ref()
+        .or(Some(&imported.audio))
+        .and_then(|path| wav::info(path).ok())
+        .map(|info| info.duration_seconds());
+    state::save(&meeting)?;
+
+    ui::success(&format!(
+        "Imported {}{}.",
+        imported.audio.display(),
+        meeting
+            .duration_seconds
+            .map(|seconds| format!(" ({})", clock(seconds)))
+            .unwrap_or_default()
+    ));
+    println!();
+    transcribe_and_finish(&meeting).await
+}
+
 async fn process(id: Option<&str>) -> Result<()> {
     // Prefer the active meeting; otherwise pick up an orphaned recording.
     if let Some(meeting) = state::load() {
@@ -744,21 +827,23 @@ async fn process(id: Option<&str>) -> Result<()> {
             .context("No recorded meeting is waiting to be transcribed.")?,
     };
 
-    let audio = directory.join("audio.wav");
-    if !audio.is_file() {
-        bail!("No audio found at {}", audio.display());
-    }
+    let audio = pipeline::recorded_audio(&directory)
+        .with_context(|| format!("No audio found in {}", directory.display()))?;
 
     let recovered_id = directory
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(nextbase_meeting::new_meeting_id);
-    let info = wav::info(&audio)?;
+    let info = wav::info(&audio).ok();
 
     let mut meeting = state::ActiveMeeting::new(&recovered_id);
     meeting.phase = Phase::Recorded;
-    meeting.audio_path = Some(audio);
-    meeting.duration_seconds = Some(info.duration_seconds());
+    meeting.audio_path = Some(audio.clone());
+    meeting.duration_seconds = info.map(|info| info.duration_seconds());
+    let sample_source = directory.join("sample-source.wav");
+    if sample_source.is_file() {
+        meeting.sample_source = Some(sample_source);
+    }
     // Restore the recorded start time when the archived state is still there, so the
     // note does not claim the meeting happened now.
     if let Ok(raw) = std::fs::read_to_string(directory.join("meeting-state.json")) {
@@ -770,8 +855,11 @@ async fn process(id: Option<&str>) -> Result<()> {
     state::save(&meeting)?;
 
     ui::info(&format!(
-        "Picking up {recovered_id} ({} of audio).",
-        clock(info.duration_seconds())
+        "Picking up {recovered_id}{}.",
+        meeting
+            .duration_seconds
+            .map(|seconds| format!(" ({} of audio)", clock(seconds)))
+            .unwrap_or_default()
     ));
     transcribe_and_finish(&meeting).await
 }

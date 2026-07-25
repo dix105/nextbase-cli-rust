@@ -9,6 +9,7 @@ pub mod autostart;
 pub mod capture;
 pub mod config;
 pub mod hotkey;
+pub mod import;
 pub mod log;
 pub mod media;
 pub mod paste;

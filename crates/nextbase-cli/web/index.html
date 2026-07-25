@@ -3,357 +3,706 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wisper</title>
+<title>Nextbase</title>
 <style>
+  /* Warm neutrals and one muted teal. No gradients, no glow: this is a local tool
+     that shows numbers, and the numbers should be the loudest thing on the page. */
   :root {
     color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #16181d;
-    --muted: #6b7280;
-    --line: #e5e7eb;
-    --card: #f9fafb;
-    --accent: #2563eb;
-    --ok: #059669;
-    --warn: #b45309;
+
+    --paper: #fbfaf7;
+    --surface: #ffffff;
+    --sunken: #f3f1ec;
+    --ink: #1c1b18;
+    --ink-soft: #55524b;
+    --ink-faint: #8b8780;
+    --rule: #e2ded6;
+    --rule-strong: #cfcac0;
+
+    --accent: #1f6f63;
+    --accent-soft: #e6f0ed;
+    --ok: #2c6e49;
+    --warn: #8a5a1b;
+    --warn-soft: #fbf1e2;
+    --danger: #9c3b28;
+
+    --radius: 10px;
+    --radius-sm: 7px;
+    --shadow: 0 1px 2px rgba(28, 27, 24, 0.05);
+
+    --sans: ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    --serif: ui-serif, Georgia, "Iowan Old Style", serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   }
+
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1115; --fg: #e6e8ec; --muted: #9aa1ad;
-      --line: #23262e; --card: #16181d; --accent: #60a5fa;
-      --ok: #34d399; --warn: #fbbf24;
+      --paper: #14140f;
+      --surface: #1b1b16;
+      --sunken: #222219;
+      --ink: #edeae3;
+      --ink-soft: #a9a49a;
+      --ink-faint: #767168;
+      --rule: #2e2e26;
+      --rule-strong: #403f34;
+
+      --accent: #6fbfae;
+      --accent-soft: #1a2b28;
+      --ok: #7cb98f;
+      --warn: #d9a866;
+      --warn-soft: #2a2318;
+      --danger: #d98b76;
+      --shadow: none;
     }
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--fg);
-    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
-  }
-  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
-  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
-  .status {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 10px; margin-bottom: 24px;
-  }
-  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-  .tile .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
-  .tile .v { font-size: 14px; margin-top: 3px; font-weight: 500; word-break: break-word; }
-  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
-  .dot.on { background: var(--ok); }
-  .dot.off { background: var(--muted); }
-  .dot.warn { background: var(--warn); }
-  .bar { display: flex; gap: 8px; margin-bottom: 14px; }
-  input[type=search] {
-    flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
-    background: var(--bg); color: var(--fg); font: inherit;
-  }
-  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-  .count { color: var(--muted); font-size: 13px; align-self: center; white-space: nowrap; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li {
-    border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px;
-    margin-bottom: 8px; background: var(--card);
-  }
-  .meta { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 5px; }
-  time, .src { color: var(--muted); font-size: 12px; }
-  .text { white-space: pre-wrap; word-break: break-word; }
-  .row { display: flex; gap: 6px; }
-  button {
-    font: inherit; font-size: 12px; padding: 4px 9px; border-radius: 6px;
-    border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer;
-  }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  .empty { color: var(--muted); padding: 28px 0; text-align: center; }
 
-  /* Meeting Agent panel */
-  .panel {
-    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
-    padding: 14px 16px; margin-bottom: 24px;
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
   }
-  .panel h2 { font-size: 15px; margin: 0 0 2px; }
-  .panel .note { color: var(--muted); font-size: 12px; }
-  .panel .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-  .panel button.primary { border-color: var(--accent); color: var(--accent); font-size: 13px; padding: 6px 14px; }
-  .panel button.danger { border-color: var(--warn); color: var(--warn); }
-  .panel button:disabled { opacity: 0.45; cursor: not-allowed; }
-  .elapsed { font-variant-numeric: tabular-nums; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
-  .levels { display: grid; gap: 6px; margin-top: 10px; }
-  .level { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
-  .meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
-  .meter > i { display: block; height: 100%; background: var(--ok); width: 0; transition: width 120ms linear; }
-  .level.silent .meter > i { background: var(--warn); }
-  .candidates { display: grid; gap: 10px; margin-top: 12px; }
-  .candidate { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
-  .candidate h3 { font-size: 13px; margin: 0 0 6px; font-family: ui-monospace, SFMono-Regular, monospace; }
-  .facts { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  a { color: var(--accent); }
+
+  .shell { max-width: 900px; margin: 0 auto; padding: 0 24px 96px; }
+
+  /* ---------------------------------------------------------------- header */
+  header.top {
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    padding: 28px 0 0;
+  }
+  .wordmark {
+    font: 500 21px/1 var(--serif); letter-spacing: 0.01em; margin: 0;
+  }
+  .wordmark span { color: var(--ink-faint); }
+  .top .spacer { flex: 1; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--ink-soft);
+    border: 1px solid var(--rule); border-radius: 999px;
+    padding: 4px 11px; background: var(--surface);
+    white-space: nowrap;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); flex: none; }
+  .dot.on { background: var(--ok); }
+  .dot.busy { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.off { background: var(--ink-faint); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+
+  /* ------------------------------------------------------------------ tabs */
+  .tabs { display: flex; gap: 26px; margin: 22px 0 0; border-bottom: 1px solid var(--rule); }
+  .tab {
+    appearance: none; background: none; border: 0; cursor: pointer;
+    font: inherit; color: var(--ink-faint); padding: 0 1px 12px;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .tab:hover { color: var(--ink-soft); }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 500; }
+  .tab .badge {
+    font: 500 11px/1 var(--mono); color: var(--accent);
+    background: var(--accent-soft); border-radius: 999px; padding: 3px 6px;
+  }
+  .tab:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  .panel[hidden] { display: none; }
+  .panel { padding-top: 28px; }
+
+  /* ----------------------------------------------------------------- cards */
+  .card {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card.quiet { background: var(--sunken); box-shadow: none; }
+  .card > h2 {
+    font: 500 14px/1.4 var(--sans); margin: 0 0 3px;
+    letter-spacing: 0.01em;
+  }
+  .card > .lede { color: var(--ink-soft); font-size: 13px; margin: 0; }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 1px;
+           background: var(--rule); border: 1px solid var(--rule);
+           border-radius: var(--radius); overflow: hidden; margin-bottom: 16px; }
+  .fact { background: var(--surface); padding: 11px 13px; }
+  .fact dt { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
+  .fact dd { margin: 4px 0 0; font-size: 14px; font-weight: 500; word-break: break-word; }
+  .fact dd.mono { font-family: var(--mono); font-size: 13px; }
+
+  /* --------------------------------------------------------------- buttons */
+  button.btn {
+    appearance: none; font: 500 13px/1 var(--sans); cursor: pointer;
+    padding: 9px 15px; border-radius: var(--radius-sm);
+    border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink);
+    transition: border-color 120ms ease, color 120ms ease;
+  }
+  button.btn:hover:not(:disabled) { border-color: var(--ink-faint); }
+  button.btn.solid { background: var(--accent); border-color: var(--accent); color: #fff; }
+  @media (prefers-color-scheme: dark) { button.btn.solid { color: #10201d; } }
+  button.btn.solid:hover:not(:disabled) { filter: brightness(1.06); }
+  button.btn.danger { color: var(--danger); border-color: var(--rule-strong); }
+  button.btn.danger:hover:not(:disabled) { border-color: var(--danger); }
+  button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.link {
+    appearance: none; border: 0; background: none; cursor: pointer;
+    font: 12px/1 var(--sans); color: var(--ink-faint); padding: 4px 6px; border-radius: 5px;
+  }
+  button.link:hover { color: var(--ink); background: var(--sunken); }
+  .actions { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 15px; }
+
+  /* --------------------------------------------------------------- recorder */
+  .timer {
+    font: 600 40px/1 var(--mono); letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; margin: 14px 0 2px;
+  }
+  .timer.idle { color: var(--ink-faint); }
+  .undertimer { color: var(--ink-faint); font-size: 12px; font-family: var(--mono); }
+
+  .levels { display: grid; gap: 8px; margin-top: 18px; }
+  .level { display: grid; grid-template-columns: 108px 1fr 74px; gap: 10px; align-items: center; font-size: 12px; }
+  .level .name { color: var(--ink-soft); }
+  .track { height: 5px; border-radius: 3px; background: var(--sunken); overflow: hidden; }
+  .track > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width 120ms linear; }
+  .level.silent .track > i { background: var(--warn); }
+  .level .read { font-family: var(--mono); color: var(--ink-faint); text-align: right; }
+
+  /* ------------------------------------------------------------------ note */
+  .notice {
+    border-left: 2px solid var(--warn); background: var(--warn-soft);
+    padding: 9px 13px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    font-size: 13px; margin-top: 14px;
+  }
+  .notice.plain { border-left-color: var(--rule-strong); background: var(--sunken); }
+  .notice strong { font-weight: 600; }
+
+  /* ---------------------------------------------------------------- import */
+  .import { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
+  .import input {
+    flex: 1 1 320px; min-width: 0;
+    padding: 9px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--rule-strong); background: var(--paper); color: var(--ink);
+    font: 13px/1.4 var(--mono);
+  }
+  .import input::placeholder { color: var(--ink-faint); font-family: var(--sans); }
+
+  /* -------------------------------------------------------------- candidates */
+  .candidates { display: grid; gap: 14px; margin-top: 16px; }
+  @media (min-width: 760px) { .candidates.pair { grid-template-columns: 1fr 1fr; } }
+  .candidate { border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px 15px; background: var(--paper); }
+  .candidate header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .candidate h3 { font: 500 13px/1 var(--mono); margin: 0; color: var(--accent); }
+  .candidate .measured { list-style: none; margin: 11px 0 0; padding: 0; font-size: 12px; color: var(--ink-soft); }
+  .candidate .measured li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px dotted var(--rule); }
+  .candidate .measured li:last-child { border-bottom: 0; }
+  .candidate .measured b { font-weight: 500; font-family: var(--mono); color: var(--ink); }
   .excerpt {
-    font-size: 12px; white-space: pre-wrap; word-break: break-word;
-    max-height: 180px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    margin-top: 12px; padding: 11px 12px; border-radius: var(--radius-sm);
+    background: var(--sunken); font: 12px/1.65 var(--mono);
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto;
   }
-  .warnbox {
-    border-left: 3px solid var(--warn); padding: 6px 10px; margin-top: 10px;
-    font-size: 12px; color: var(--fg); background: color-mix(in srgb, var(--warn) 8%, transparent);
+
+  /* ------------------------------------------------------------------ lists */
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .toolbar input[type=search] {
+    flex: 1; padding: 9px 12px; border-radius: var(--radius-sm);
+    border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink); font: inherit; font-size: 14px;
   }
+  .toolbar .count { color: var(--ink-faint); font-size: 12px; font-family: var(--mono); white-space: nowrap; }
+
+  ul.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+  ul.rows > li {
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    padding: 12px 14px; background: var(--surface);
+  }
+  .rowhead { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 5px; }
+  .stamp { font: 11px/1 var(--mono); color: var(--ink-faint); }
+  .body { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+  .rowmeta { display: flex; gap: 8px; align-items: center; }
+
+  .meetingrow { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+  .meetingrow .who { min-width: 0; }
+  .meetingrow .title { font-weight: 500; overflow-wrap: anywhere; }
+  .meetingrow .sub { font: 11px/1.5 var(--mono); color: var(--ink-faint); margin-top: 2px; }
+  .tag {
+    font: 500 10px/1 var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 7px; border-radius: 999px; white-space: nowrap;
+    color: var(--ink-faint); background: var(--sunken);
+  }
+  .tag.done { color: var(--ok); background: var(--accent-soft); }
+
+  .empty {
+    border: 1px dashed var(--rule-strong); border-radius: var(--radius);
+    padding: 34px 20px; text-align: center; color: var(--ink-faint); font-size: 14px;
+  }
+  .empty b { display: block; color: var(--ink-soft); font-weight: 500; margin-bottom: 4px; }
+
+  .footnote { color: var(--ink-faint); font-size: 12px; margin-top: 22px; line-height: 1.7; }
+  code { font: 12px/1 var(--mono); background: var(--sunken); padding: 2px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header><h1>Wisper</h1><span class="sub" id="listener"></span></header>
-  <div class="sub">Local dashboard. Nothing here leaves your machine.</div>
+<div class="shell">
 
-  <div class="panel" id="meeting" hidden></div>
+  <header class="top">
+    <h1 class="wordmark">Nextbase<span>&nbsp;/ local</span></h1>
+    <div class="spacer"></div>
+    <span class="pill" id="headline"><i class="dot"></i><span>loading</span></span>
+  </header>
 
-  <div class="status" id="status"></div>
-
-  <div class="bar">
-    <input type="search" id="q" placeholder="Search transcripts" autocomplete="off">
-    <span class="count" id="count"></span>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-wisper" aria-selected="true" aria-controls="panel-wisper">Wisper</button>
+    <button class="tab" role="tab" id="tab-meeting" aria-selected="false" aria-controls="panel-meeting">
+      Meeting <span class="badge" id="meeting-badge" hidden></span>
+    </button>
   </div>
 
-  <ul id="list"></ul>
-  <div class="empty" id="empty" hidden>No transcripts yet. Hold your shortcut and speak.</div>
+  <!-- ------------------------------------------------------------ Wisper -->
+  <section class="panel" id="panel-wisper" role="tabpanel" aria-labelledby="tab-wisper">
+    <dl class="facts" id="wisper-facts"></dl>
+
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Search transcripts" autocomplete="off" aria-label="Search transcripts">
+      <span class="count" id="count"></span>
+    </div>
+
+    <ul class="rows" id="transcripts"></ul>
+    <div class="empty" id="transcripts-empty" hidden>
+      <b>No transcripts yet</b>
+      Hold your dictation shortcut and speak.
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- Meeting -->
+  <section class="panel" id="panel-meeting" role="tabpanel" aria-labelledby="tab-meeting" hidden>
+    <div id="meeting-live"></div>
+
+    <h2 class="wordmark" style="font-size:15px;margin:26px 0 12px">Past meetings</h2>
+    <ul class="rows" id="meetings"></ul>
+    <div class="empty" id="meetings-empty" hidden>
+      <b>No meetings yet</b>
+      Record one, or transcribe a file you already have.
+    </div>
+
+    <p class="footnote">
+      Speaker labels are generic and are not matched to people. Timestamps are
+      phrase-level. Language detection reports which language was heard, not whether the
+      words are correct — check names, numbers and commitments against the audio.
+    </p>
+  </section>
 </div>
 
 <script>
-const escapeHtml = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
-let history = [];
+'use strict';
 
-function tile(k, v, dot) {
-  return `<div class="tile"><div class="k">${escapeHtml(k)}</div><div class="v">${
-    dot ? `<span class="dot ${dot}"></span>` : ''}${escapeHtml(v)}</div></div>`;
-}
-
-function renderStatus(state) {
-  const s = state.setup;
-  document.getElementById('status').innerHTML = [
-    tile('Provider', s.provider || 'not set', s.provider ? 'on' : 'off'),
-    tile('Model', s.model || 'not set'),
-    tile('Dictation', s.shortcut),
-    tile('Polish', s.polishShortcut),
-    tile('Spell fix', s.spellShortcut),
-    tile('Auto polish', s.autoPolish ? 'on' : 'off', s.autoPolish ? 'on' : 'off'),
-  ].join('');
-
-  const el = document.getElementById('listener');
-  if (state.listeners === 1) el.innerHTML = '<span class="dot on"></span>listener running';
-  else if (state.listeners === 0) el.innerHTML = '<span class="dot off"></span>listener stopped';
-  else el.innerHTML = `<span class="dot warn"></span>${state.listeners} listeners running`;
-}
-
-function renderList() {
-  const q = document.getElementById('q').value.trim().toLowerCase();
-  const rows = q ? history.filter((h) => h.text.toLowerCase().includes(q)) : history;
-
-  document.getElementById('count').textContent =
-    q ? `${rows.length} of ${history.length}` : `${history.length} total`;
-  document.getElementById('empty').hidden = history.length !== 0;
-
-  document.getElementById('list').innerHTML = rows.map((item) => `
-    <li>
-      <div class="meta">
-        <time>${escapeHtml(new Date(item.createdAt).toLocaleString())}</time>
-        <div class="row">
-          <button data-copy="${escapeHtml(item.id)}">Copy</button>
-          <button data-delete="${escapeHtml(item.id)}">Delete</button>
-        </div>
-      </div>
-      <div class="text">${escapeHtml(item.text)}</div>
-    </li>`).join('');
-}
-
-// ---------------------------------------------------------------- Meeting
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const clock = (seconds) => {
-  const total = Math.max(0, Math.round(seconds || 0));
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
   const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
   const pad = (n) => String(n).padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 };
 
-const PHASE_TEXT = {
+async function getJson(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `Request failed: HTTP ${response.status}`);
+  return payload;
+}
+
+// ------------------------------------------------------------------- tabs
+
+const TABS = ['wisper', 'meeting'];
+let activeTab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1)
+  : (localStorage.getItem('nextbase.tab') || 'wisper');
+
+function selectTab(name) {
+  activeTab = TABS.includes(name) ? name : 'wisper';
+  for (const tab of TABS) {
+    document.getElementById(`tab-${tab}`).setAttribute('aria-selected', String(tab === activeTab));
+    document.getElementById(`panel-${tab}`).hidden = tab !== activeTab;
+  }
+  localStorage.setItem('nextbase.tab', activeTab);
+  history.replaceState(null, '', `#${activeTab}`);
+  // Refresh immediately so a freshly shown panel is never a stale one.
+  refresh();
+}
+
+for (const tab of TABS) {
+  document.getElementById(`tab-${tab}`).addEventListener('click', () => selectTab(tab));
+}
+
+// ----------------------------------------------------------------- Wisper
+
+let transcripts = [];
+
+function fact(label, value, mono) {
+  return `<div class="fact"><dt>${escapeHtml(label)}</dt>
+    <dd${mono ? ' class="mono"' : ''}>${escapeHtml(value)}</dd></div>`;
+}
+
+function renderWisper(state) {
+  const setup = state.setup || {};
+  document.getElementById('wisper-facts').innerHTML = [
+    fact('Provider', setup.provider || 'not set'),
+    fact('Model', setup.model || 'not set', true),
+    fact('Dictation', setup.shortcut || 'not set', true),
+    fact('Polish', setup.polishShortcut || 'not set', true),
+    fact('Spell fix', setup.spellShortcut || 'not set', true),
+    fact('Auto polish', setup.autoPolish ? 'on' : 'off'),
+  ].join('');
+  renderTranscripts();
+}
+
+function renderTranscripts() {
+  const query = document.getElementById('q').value.trim().toLowerCase();
+  const rows = query
+    ? transcripts.filter((item) => (item.text || '').toLowerCase().includes(query))
+    : transcripts;
+
+  document.getElementById('count').textContent =
+    transcripts.length ? `${rows.length}/${transcripts.length}` : '';
+  document.getElementById('transcripts-empty').hidden = transcripts.length > 0;
+
+  document.getElementById('transcripts').innerHTML = rows.map((item) => `<li>
+    <div class="rowhead">
+      <span class="stamp">${escapeHtml(item.createdAt)}${
+        item.source ? ` &middot; ${escapeHtml(item.source)}` : ''}</span>
+      <span class="rowmeta">
+        <button class="link" data-copy="${escapeHtml(item.id)}">Copy</button>
+        <button class="link" data-delete="${escapeHtml(item.id)}">Delete</button>
+      </span>
+    </div>
+    <div class="body">${escapeHtml(item.text)}</div>
+  </li>`).join('');
+}
+
+// ---------------------------------------------------------------- Meeting
+
+const PHASE = {
   'starting': 'Opening the microphone and system audio',
   'recording': 'Recording',
   'stopping': 'Finalizing the recording',
   'recorded': 'Recorded, not yet transcribed',
   'sampling': 'Transcribing a sample in both modes',
-  'awaiting-approval': 'Waiting for you to pick a mode',
+  'awaiting-approval': 'Waiting for you to choose',
   'transcribing': 'Transcribing the full recording',
   'summarising': 'Writing the summary and action items',
   'done': 'Finished',
   'failed': 'Failed',
 };
 
+const importBox = () => `<div class="import">
+    <input id="import-source" placeholder="/path/to/recording.m4a  or  https://example.com/audio.mp3"
+           aria-label="Audio file path or URL" value="${escapeHtml(importDraft)}">
+    <button class="btn" data-action="import">Transcribe</button>
+  </div>
+  <p class="footnote" style="margin-top:9px">
+    A local path is read from this machine. Remote URLs are downloaded first.
+  </p>`;
+
+let importDraft = '';
+
 function levelRow(level) {
-  // Scaled by RMS rather than peak: a single click would otherwise peg the meter.
+  // Scaled by RMS, not peak: one click would otherwise peg the meter for a minute.
   const width = Math.min(100, Math.round((level.rms || 0) * 900));
   return `<div class="level${level.silent ? ' silent' : ''}">
-    <span>${escapeHtml(level.source)}</span>
-    <span class="meter"><i style="width:${width}%"></i></span>
-    <span>${level.silent ? 'silent' : `peak ${(level.peak || 0).toFixed(3)}`}</span>
+    <span class="name">${escapeHtml(level.source)}</span>
+    <span class="track"><i style="width:${width}%"></i></span>
+    <span class="read">${level.silent ? 'silent' : (level.peak || 0).toFixed(3)}</span>
   </div>`;
 }
 
 function candidateCard(candidate) {
   if (candidate.error) {
-    return `<div class="candidate"><h3>${escapeHtml(candidate.mode)}</h3>
-      <div class="facts">Failed: ${escapeHtml(candidate.error)}</div></div>`;
+    return `<div class="candidate">
+      <header><h3>${escapeHtml(candidate.mode)}</h3></header>
+      <div class="notice" style="margin-top:10px">Failed: ${escapeHtml(candidate.error)}</div>
+    </div>`;
   }
   const coverage = candidate.coveredSeconds == null
-    ? 'no timestamps returned'
+    ? 'no timestamps'
     : `${clock(candidate.coveredSeconds)} of ${clock(candidate.sampleSeconds)}`;
+
   return `<div class="candidate">
-    <h3>${escapeHtml(candidate.mode)}</h3>
-    <div class="facts">
-      took ${clock(candidate.elapsedSeconds)} &middot; coverage ${escapeHtml(coverage)} &middot;
-      ${candidate.segmentCount} segments, ${candidate.speakerLabels} generic label(s),
-      ${candidate.overlappingSegments} overlapping &middot;
-      language detected: ${escapeHtml(candidate.detectedLanguage || 'not reported')}
-    </div>
+    <header>
+      <h3>${escapeHtml(candidate.mode)}</h3>
+      <button class="btn solid" data-approve="${escapeHtml(candidate.mode)}">Use this</button>
+    </header>
+    <ul class="measured">
+      <li><span>Took</span><b>${clock(candidate.elapsedSeconds)}</b></li>
+      <li><span>Coverage</span><b>${escapeHtml(coverage)}</b></li>
+      <li><span>Language detected</span><b>${escapeHtml(candidate.detectedLanguage || 'not reported')}</b></li>
+      <li><span>Segments</span><b>${candidate.segmentCount}</b></li>
+      <li><span>Speaker labels</span><b>${candidate.speakerLabels}</b></li>
+      <li><span>Overlapping</span><b>${candidate.overlappingSegments}</b></li>
+    </ul>
     <div class="excerpt">${escapeHtml(candidate.text || '(empty)')}</div>
-    <div class="actions">
-      <button class="primary" data-approve="${escapeHtml(candidate.mode)}">Use ${escapeHtml(candidate.mode)}</button>
-    </div>
   </div>`;
 }
 
 function renderMeeting(meeting) {
-  const panel = document.getElementById('meeting');
+  const host = document.getElementById('meeting-live');
+  const badge = document.getElementById('meeting-badge');
 
   if (!meeting.active) {
-    panel.hidden = false;
-    panel.innerHTML = `<h2>Meeting Agent</h2>
-      <div class="note">No meeting in progress.</div>
-      ${meeting.unfinished ? `<div class="warnbox">${meeting.unfinished} recorded meeting(s)
-        were never transcribed. Finish with <code>nbmeet process</code>.</div>` : ''}
-      <div class="actions"><button class="primary" data-meeting="start">Start recording</button></div>`;
+    badge.hidden = !meeting.unfinished;
+    badge.textContent = meeting.unfinished || '';
+
+    host.innerHTML = `<div class="card">
+      <h2>Ready</h2>
+      <p class="lede">Records your microphone and the other participants together.</p>
+      <div class="timer idle">0:00</div>
+      <div class="actions">
+        <button class="btn solid" data-action="start">Start recording</button>
+      </div>
+      ${importBox()}
+      ${meeting.unfinished ? `<div class="notice">
+        <strong>${meeting.unfinished}</strong> recorded meeting${meeting.unfinished === 1 ? '' : 's'}
+        ${meeting.unfinished === 1 ? 'was' : 'were'} never transcribed.
+        <button class="link" data-action="process" style="margin-left:4px">Transcribe the latest</button>
+      </div>` : ''}
+    </div>`;
     return;
   }
 
-  panel.hidden = false;
-  const phase = PHASE_TEXT[meeting.phase] || meeting.phase;
-  const levels = (meeting.sourceLevels || []).map(levelRow).join('');
-  const silent = (meeting.sourceLevels || []).filter((l) => l.silent);
+  badge.hidden = false;
+  badge.textContent = meeting.capturing ? 'REC' : (meeting.processing ? '···' : '1');
 
-  let body = `<h2>Meeting Agent</h2>
-    <div class="note">${escapeHtml(meeting.id)} &middot; ${escapeHtml(phase)}</div>`;
+  const levels = (meeting.sourceLevels || []).map(levelRow).join('');
+  const silent = (meeting.sourceLevels || []).filter((level) => level.silent);
+  let html = '';
 
   if (meeting.capturing) {
-    body += `<div class="elapsed">${clock(meeting.elapsedSeconds)}</div>
-      <div class="note">${meeting.onDiskSeconds != null
-        ? `${clock(meeting.onDiskSeconds)} safely written to disk`
-        : 'starting'}</div>
+    html += `<div class="card">
+      <h2>${escapeHtml(PHASE[meeting.phase] || meeting.phase)}</h2>
+      <p class="lede">${escapeHtml(meeting.id)}</p>
+      <div class="timer">${clock(meeting.elapsedSeconds)}</div>
+      <div class="undertimer">${meeting.onDiskSeconds != null
+        ? `${clock(meeting.onDiskSeconds)} written to disk`
+        : 'opening devices'}</div>
+      ${levels ? `<div class="levels">${levels}</div>` : ''}
       <div class="actions">
-        <button class="primary" data-meeting="stop"${meeting.phase === 'stopping' ? ' disabled' : ''}>
+        <button class="btn solid" data-action="stop"${meeting.phase === 'stopping' ? ' disabled' : ''}>
           ${meeting.phase === 'stopping' ? 'Stopping…' : 'Stop and transcribe'}</button>
-      </div>`;
-  } else if (meeting.recordedSeconds != null) {
-    body += `<div class="elapsed">${clock(meeting.recordedSeconds)}</div>`;
+      </div>
+    </div>`;
+  } else {
+    html += `<div class="card">
+      <h2>${escapeHtml(PHASE[meeting.phase] || meeting.phase)}</h2>
+      <p class="lede">${escapeHtml(meeting.id)}</p>
+      ${meeting.recordedSeconds != null ? `<div class="timer">${clock(meeting.recordedSeconds)}</div>` : ''}
+      ${levels ? `<div class="levels">${levels}</div>` : ''}
+      ${meeting.processing ? `<div class="notice plain">Sarvam Batch jobs queue, so this can take
+        several minutes. Safe to close this tab — it keeps running.</div>` : ''}
+      ${meeting.phase === 'recorded' ? `<div class="actions">
+        <button class="btn solid" data-action="process">Transcribe it</button></div>` : ''}
+    </div>`;
   }
 
-  if (levels) body += `<div class="levels">${levels}</div>`;
   for (const level of silent) {
-    body += `<div class="warnbox"><strong>${escapeHtml(level.source)}</strong> was silent for the
+    html += `<div class="notice"><strong>${escapeHtml(level.source)}</strong> was silent for the
       whole recording, so anything from that side is missing from the transcript.</div>`;
   }
-
-  if (meeting.processing) {
-    body += `<div class="note" style="margin-top:10px">This can take several minutes — Sarvam
-      Batch jobs queue. Safe to close this tab; it keeps running.</div>`;
+  if (meeting.error) {
+    html += `<div class="notice">${escapeHtml(meeting.error)}</div>`;
   }
 
   if (meeting.phase === 'awaiting-approval' && meeting.sample) {
     const sample = meeting.sample;
-    body += `<div class="note" style="margin-top:12px">
-      Sample: ${clock(sample.windowSeconds)} from ${clock(sample.windowStartSeconds)},
-      RMS ${(sample.windowRms || 0).toFixed(4)}</div>`;
-    if ((sample.windowRms || 0) < 0.005) {
-      body += `<div class="warnbox">That window is nearly silent, so neither transcript
-        means much.</div>`;
-    }
-    body += `<div class="candidates">${(sample.candidates || []).map(candidateCard).join('')}</div>
-      <div class="warnbox">Speaker labels are generic, not people. Language detection says which
-        language was heard, not whether the words are right. Check names and numbers against the
-        audio.</div>
-      <div class="actions"><button class="danger" data-meeting="reject">Reject — do not
-        transcribe</button></div>`;
+    const usable = (sample.candidates || []).length;
+    html += `<div class="card">
+      <h2>Which transcription is good enough?</h2>
+      <p class="lede">Sample: ${clock(sample.windowSeconds)} taken from
+        ${clock(sample.windowStartSeconds)}, RMS ${(sample.windowRms || 0).toFixed(4)}</p>
+      ${(sample.windowRms || 0) < 0.005 ? `<div class="notice">That window is nearly silent,
+        so neither transcript means much.</div>` : ''}
+      <div class="candidates${usable > 1 ? ' pair' : ''}">
+        ${(sample.candidates || []).map(candidateCard).join('')}
+      </div>
+      <div class="actions">
+        <button class="btn danger" data-action="reject">Reject — do not transcribe</button>
+      </div>
+    </div>`;
   }
 
-  if (meeting.phase === 'recorded') {
-    body += `<div class="actions"><button class="primary" data-meeting="process">Transcribe
-      it</button></div>`;
-  }
-  if (meeting.error) {
-    body += `<div class="warnbox">${escapeHtml(meeting.error)}</div>`;
-  }
-
-  panel.innerHTML = body;
+  host.innerHTML = html;
 }
 
-async function post(path) {
-  const response = await fetch(path, { method: 'POST' });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    alert(body.error || `Request failed: HTTP ${response.status}`);
-  }
-  await refresh();
+function renderMeetingHistory(meetings) {
+  document.getElementById('meetings-empty').hidden = meetings.length > 0;
+  document.getElementById('meetings').innerHTML = meetings.map((meeting) => `<li>
+    <div class="meetingrow">
+      <span class="who">
+        <div class="title">${escapeHtml(meeting.title || meeting.id)}</div>
+        <div class="sub">${escapeHtml(meeting.id)}${
+          meeting.seconds != null ? ` &middot; ${clock(meeting.seconds)}` : ''}</div>
+      </span>
+      <span class="rowmeta">
+        <span class="tag${meeting.transcribed ? ' done' : ''}">${
+          meeting.transcribed ? 'notes ready' : 'not transcribed'}</span>
+        <button class="link" data-path="${escapeHtml(meeting.directory)}">Copy path</button>
+      </span>
+    </div>
+  </li>`).join('');
 }
 
-async function refreshState() {
-  const state = await (await fetch('/api/state')).json();
-  history = state.history;
-  renderStatus(state);
-  renderList();
+// --------------------------------------------------------------- headline
+
+function renderHeadline(state, meeting) {
+  const element = document.getElementById('headline');
+  if (meeting && meeting.active && meeting.capturing) {
+    element.innerHTML = `<i class="dot busy"></i><span>recording ${clock(meeting.elapsedSeconds)}</span>`;
+    return;
+  }
+  if (meeting && meeting.active && meeting.processing) {
+    element.innerHTML = '<i class="dot busy"></i><span>transcribing</span>';
+    return;
+  }
+  const listeners = state ? state.listeners : null;
+  if (listeners === 1) element.innerHTML = '<i class="dot on"></i><span>listener running</span>';
+  else if (listeners === 0) element.innerHTML = '<i class="dot off"></i><span>listener stopped</span>';
+  else if (listeners != null) element.innerHTML = `<i class="dot busy"></i><span>${listeners} listeners</span>`;
+}
+
+// ---------------------------------------------------------------- refresh
+
+let lastState = null;
+let lastMeeting = null;
+
+async function refreshWisper() {
+  lastState = await getJson('/api/state');
+  transcripts = lastState.history || [];
+  renderWisper(lastState);
 }
 
 async function refreshMeeting() {
-  renderMeeting(await (await fetch('/api/meeting')).json());
+  lastMeeting = await getJson('/api/meeting');
+  // Keep whatever is being typed: this redraws every second while recording.
+  const field = document.getElementById('import-source');
+  if (field) importDraft = field.value;
+  const focused = document.activeElement === field;
+  const caret = focused ? field.selectionStart : null;
+
+  renderMeeting(lastMeeting);
+
+  const replaced = document.getElementById('import-source');
+  if (focused && replaced) {
+    replaced.focus();
+    if (caret != null) replaced.setSelectionRange(caret, caret);
+  }
 }
 
 async function refresh() {
-  await Promise.all([refreshState(), refreshMeeting()]);
+  const jobs = [];
+  // The meeting endpoint is cheap; /api/state enumerates every process to count
+  // listeners, so it is only fetched when its own tab is showing.
+  jobs.push(refreshMeeting().catch(() => {}));
+  if (activeTab === 'wisper' || lastState === null) jobs.push(refreshWisper().catch(() => {}));
+  await Promise.all(jobs);
+
+  renderHeadline(lastState, lastMeeting);
+  if (activeTab === 'meeting') {
+    getJson('/api/meeting/history').then(renderMeetingHistory).catch(() => {});
+  }
 }
 
-document.getElementById('q').addEventListener('input', renderList);
+// ----------------------------------------------------------------- events
+
+document.getElementById('q').addEventListener('input', renderTranscripts);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && event.target.id === 'import-source') {
+    document.querySelector('[data-action="import"]')?.click();
+  }
+});
 
 document.addEventListener('click', async (event) => {
   const copy = event.target.closest('[data-copy]');
   if (copy) {
-    const item = history.find((h) => h.id === copy.dataset.copy);
-    await navigator.clipboard.writeText(item.text);
+    const item = transcripts.find((entry) => entry.id === copy.dataset.copy);
+    if (item) await navigator.clipboard.writeText(item.text);
     copy.textContent = 'Copied';
     setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
     return;
   }
 
-  const del = event.target.closest('[data-delete]');
-  if (del) {
-    await fetch(`/api/history/${encodeURIComponent(del.dataset.delete)}`, { method: 'DELETE' });
-    await refresh();
+  const path = event.target.closest('[data-path]');
+  if (path) {
+    await navigator.clipboard.writeText(path.dataset.path);
+    path.textContent = 'Copied';
+    setTimeout(() => { path.textContent = 'Copy path'; }, 1200);
+    return;
+  }
+
+  const remove = event.target.closest('[data-delete]');
+  if (remove) {
+    await fetch(`/api/history/${encodeURIComponent(remove.dataset.delete)}`, { method: 'DELETE' });
+    await refreshWisper();
     return;
   }
 
   const approve = event.target.closest('[data-approve]');
   if (approve) {
     approve.disabled = true;
-    await post(`/api/meeting/approve/${encodeURIComponent(approve.dataset.approve)}`);
+    try {
+      await post(`/api/meeting/approve/${encodeURIComponent(approve.dataset.approve)}`);
+    } catch (error) {
+      alert(error.message);
+      approve.disabled = false;
+    }
+    await refresh();
     return;
   }
 
-  const action = event.target.closest('[data-meeting]');
-  if (action) {
-    action.disabled = true;
-    // `process` reuses the stop endpoint's hand-off: both mean "take it from here".
-    const route = action.dataset.meeting === 'process' ? 'stop' : action.dataset.meeting;
-    await post(`/api/meeting/${route}`);
+  const action = event.target.closest('[data-action]');
+  if (!action) return;
+
+  action.disabled = true;
+  try {
+    switch (action.dataset.action) {
+      case 'start': await post('/api/meeting/start'); break;
+      // `process` and `stop` are the same endpoint: both mean "take it from here".
+      case 'stop':
+      case 'process': await post('/api/meeting/stop'); break;
+      case 'reject': await post('/api/meeting/reject'); break;
+      case 'import': {
+        const field = document.getElementById('import-source');
+        const source = (field?.value || '').trim();
+        if (!source) { field?.focus(); break; }
+        await post('/api/meeting/audio', { source });
+        importDraft = '';
+        break;
+      }
+    }
+  } catch (error) {
+    alert(error.message);
   }
+  action.disabled = false;
+  await refresh();
 });
 
-refresh();
-// A recording needs a live clock, but /api/state enumerates every process to count
-// listeners — far too expensive to run every second. Two intervals, not one.
-setInterval(refreshMeeting, 1000);
-setInterval(refreshState, 4000);
+selectTab(activeTab);
+// One second keeps the recording clock honest; the expensive endpoint is gated above.
+setInterval(refresh, 1000);
 </script>
 </body>
 </html>
