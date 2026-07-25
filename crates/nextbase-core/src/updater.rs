@@ -270,6 +270,22 @@ fn verify_runnable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Fail before spending a download on a directory that cannot be written to —
+/// `WISPER_BIN_DIR=/usr/local/bin` installs are root-owned on a default macOS.
+fn ensure_writable(dir: &Path) -> Result<()> {
+    let probe = dir.join(".wisper-update-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(error) => bail!(
+            "Cannot write to {} ({error}). Re-run the installer, or run the update with permission to write there.",
+            dir.display()
+        ),
+    }
+}
+
 async fn download(client: &reqwest::Client, asset: &Asset) -> Result<Vec<u8>> {
     let response = client
         .get(&asset.url)
@@ -305,6 +321,7 @@ async fn download(client: &reqwest::Client, asset: &Asset) -> Result<Vec<u8>> {
 pub async fn apply(release: &Release) -> Result<Applied> {
     let target = build_target()?;
     let dir = install_dir()?;
+    ensure_writable(&dir)?;
     let client = client()?;
 
     // Download everything before touching the install, so a network failure
