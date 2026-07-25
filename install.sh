@@ -189,8 +189,9 @@ say "  wisper listen    Start the background listener"
 
 if [ "$OS" = "apple-darwin" ]; then
   say ""
-  warn "macOS needs Accessibility permission for global shortcuts:"
-  say "  System Settings > Privacy & Security > Accessibility, then add:"
-  say "  $BIN_DIR/wisper"
-  say "  The grant is tied to this exact binary, so re-run this after any update."
+  # A shell script cannot raise the permission dialog; the CLI can, so point at it
+  # instead of reciting a menu path and a file the user would have to go find.
+  warn "macOS needs Accessibility permission for global shortcuts."
+  say "  wisper setup asks for it directly — no need to hunt through System Settings."
+  say "  The grant is tied to this exact binary, so it is asked for again after an update."
 fi

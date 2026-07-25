@@ -74,12 +74,18 @@ wisper doctor    # permissions, microphone, shortcuts, provider, listener
 wisper listen    # start the background listener
 ```
 
-On macOS, `wisper doctor` reports Accessibility as missing until you grant it in
-**System Settings → Privacy & Security → Accessibility**, adding the installed
-binary. Global shortcuts cannot work without it, and the grant is tied to that
-exact binary — so it has to be re-granted after an update replaces it. Until
-releases are signed, macOS also quarantines a downloaded binary; the installer
-clears that for you.
+On macOS, global shortcuts need Accessibility permission. `wisper setup`, `wisper
+listen` and `wisper doctor` ask macOS for it directly — the system dialog names the
+binary and adds it to the Accessibility list, so all that is left is the switch;
+there is no path to copy or file picker to navigate. Nothing can award the grant
+programmatically, so this is as direct as macOS allows.
+
+Run from a terminal that already has Accessibility, permission is inherited and
+nothing is asked. A listener started at login is evaluated on its own, so that is
+where the grant actually has to be against the `wisper` binary — and because the
+grant is tied to that exact binary, it has to be given again after an update
+replaces it. Until releases are signed, macOS also quarantines a downloaded
+binary; the installer clears that for you.
 
 ### Updating
 

@@ -20,10 +20,39 @@ use crate::shortcut;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef)
+        -> bool;
+    static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
 }
 
 pub fn is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Ask macOS to show its own Accessibility permission dialog.
+///
+/// This is the only way to *request* the grant; there is no API that can award it.
+/// The dialog names this binary and its button opens the right settings pane, which
+/// beats telling someone to navigate five levels of System Settings by hand. macOS
+/// also adds the binary to the Accessibility list as a side effect, so the user
+/// only has to flip the switch instead of finding the file in a picker.
+///
+/// Returns whether permission is already granted — the dialog is not modal to us,
+/// so a `false` here just means "asked".
+pub fn request_trust() -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let options = CFDictionary::from_CFType_pairs(&[(
+            key.as_CFType(),
+            CFBoolean::true_value().as_CFType(),
+        )]);
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+    }
 }
 
 /// `CFRunLoopStop` is documented as safe to call from another thread, which is the

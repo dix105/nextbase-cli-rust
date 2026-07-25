@@ -137,9 +137,51 @@ pub fn capture() -> Result<(std::sync::mpsc::Receiver<CaptureUpdate>, HotkeyHand
     }
 }
 
+/// Trigger the platform's own permission prompt, if it has one.
+///
+/// Returns `Ok(true)` when permission is already held, `Ok(false)` when the user
+/// was asked and has not decided yet, and `Err` where there is nothing to ask.
+pub fn request_permission() -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos::request_trust())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("No permission is needed for global shortcuts on this platform.")
+    }
+}
+
+/// Open the settings page where the grant is toggled.
+///
+/// Used after `request_permission`: the system dialog can be dismissed by accident,
+/// and its own button is the only other way to land on the right pane.
+pub fn open_permission_settings() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Could not open System Settings.");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("There is no permission settings page to open on this platform.")
+    }
+}
+
+/// Whether this platform gates global shortcuts behind a permission at all.
+pub fn permission_is_required() -> bool {
+    cfg!(target_os = "macos")
+}
+
 pub fn permission_hint() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Grant Accessibility permission: System Settings > Privacy & Security > Accessibility, then add this binary (or your terminal) and restart the listener."
+        // Also written to the log, where nothing can prompt, so it names both routes.
+        "Run `wisper doctor` and let it ask macOS for Accessibility permission, or grant it under System Settings > Privacy & Security > Accessibility, then restart the listener."
     } else {
         "Another application may already own this shortcut. Try a different key."
     }

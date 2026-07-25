@@ -532,9 +532,9 @@ pub async fn setup(update_mode: bool) -> Result<()> {
         return Ok(());
     }
 
-    if !hotkey::has_permission() {
-        ui::warn("Accessibility permission is missing, so shortcuts will not fire yet.");
-        ui::hint(hotkey::permission_hint());
+    // Ask before starting the listener: a listener with no permission registers
+    // nothing, and setup is the moment the user is present to answer.
+    if !request_accessibility() {
         println!();
     }
 
@@ -889,8 +889,9 @@ pub async fn update(check_only: bool) -> Result<()> {
         // macOS ties Accessibility permission to binary identity, and these builds
         // are not signed yet, so the replacement counts as a different program.
         ui::warn("macOS may no longer trust the new binary for global shortcuts.");
-        ui::hint("If the shortcut stops working: System Settings > Privacy & Security >");
-        ui::hint("Accessibility, remove wisper with the minus button, then add it again.");
+        ui::hint("If the shortcut stops working, run: wisper doctor");
+        ui::hint("It will ask macOS for permission again. An old entry in System Settings >");
+        ui::hint("Privacy & Security > Accessibility may need removing with the minus button.");
     }
     Ok(())
 }
@@ -1013,6 +1014,13 @@ pub async fn listen(foreground: bool) -> Result<()> {
     }
 
     warn_about_legacy_autostart();
+
+    // A listener without this permission starts, registers nothing, and looks
+    // fine — so ask while there is still a terminal to ask in.
+    if std::io::stdin().is_terminal() {
+        request_accessibility();
+    }
+
     process_state::stop_other_listeners();
     let survivors = process_state::stubborn_listeners();
     if !survivors.is_empty() {
@@ -1112,6 +1120,69 @@ pub async fn restart() -> Result<()> {
     listen(false).await
 }
 
+/// How long to keep watching after the system dialog appears. Long enough to find
+/// the switch, short enough not to look hung if the dialog was dismissed.
+const PERMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Ask macOS for Accessibility permission with its own dialog, then wait for it.
+///
+/// Reading out a path and a menu trail was leaving the work to the user. macOS has
+/// an API for this: the dialog names the binary, its button opens the right pane,
+/// and the binary is added to the Accessibility list so only the switch is left.
+///
+/// Returns whether permission is held by the time this returns.
+fn request_accessibility() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// `setup` asks, then calls `listen`, which asks again — without this the user
+    /// would face two dialogs and two waits for one decision.
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    if !hotkey::permission_is_required() || hotkey::has_permission() {
+        return true;
+    }
+    if ASKED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+
+    ui::warn("Global shortcuts need Accessibility permission.");
+    match hotkey::request_permission() {
+        Ok(true) => return true,
+        Ok(false) => {
+            ui::info("macOS is asking for it now.");
+            ui::hint("Choose \"Open System Settings\", then switch wisper on.");
+        }
+        Err(error) => {
+            ui::hint(&error.to_string());
+            return false;
+        }
+    }
+
+    // The dialog is the system's, not ours, so there is nothing to await — poll.
+    let bar = ui::spinner("Waiting for permission...");
+    let start = std::time::Instant::now();
+    // The dialog is easy to dismiss by accident, so if nothing has happened after a
+    // few seconds, put the pane on screen directly rather than waiting it out.
+    let open_settings_after = std::time::Duration::from_secs(8);
+    let mut opened_settings = false;
+
+    while start.elapsed() < PERMISSION_WAIT {
+        if hotkey::has_permission() {
+            bar.finish_and_clear();
+            ui::success("Accessibility granted.");
+            return true;
+        }
+        if !opened_settings && start.elapsed() > open_settings_after {
+            opened_settings = hotkey::open_permission_settings().is_ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    bar.finish_and_clear();
+
+    ui::warn("Still not granted, carrying on without it.");
+    ui::hint("Turn it on later, then run: wisper restart");
+    false
+}
+
 /// One place to see why dictation is not working. Permission problems are this
 /// tool's most common failure, and they are invisible from a detached listener.
 pub fn doctor() -> Result<()> {
@@ -1122,7 +1193,18 @@ pub fn doctor() -> Result<()> {
         ui::success("Accessibility: granted (global shortcuts can be registered)");
     } else {
         ui::failure("Accessibility: missing");
-        ui::hint(hotkey::permission_hint());
+        // Prompting is the fix, so offer it here rather than only naming the pane.
+        // Doctor is diagnostic, so this asks before taking over the screen.
+        if std::io::stdin().is_terminal()
+            && Confirm::new("Ask macOS for permission now?")
+                .with_default(true)
+                .prompt()
+                .unwrap_or(false)
+        {
+            request_accessibility();
+        } else {
+            ui::hint(hotkey::permission_hint());
+        }
     }
 
     println!();
