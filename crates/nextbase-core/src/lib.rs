@@ -9,6 +9,7 @@ pub mod autostart;
 pub mod config;
 pub mod hotkey;
 pub mod log;
+pub mod media;
 pub mod paste;
 pub mod paths;
 pub mod polish;

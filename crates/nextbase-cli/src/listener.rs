@@ -8,7 +8,7 @@
 use anyhow::Result;
 use nextbase_core::config::Config;
 use nextbase_core::hotkey::{self, HotkeyEvent};
-use nextbase_core::{audio, config, log, paste, polish, process_state, shortcut, storage, transcribe};
+use nextbase_core::{audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -245,12 +245,25 @@ fn start_recording(config: &Config) -> Result<audio::Recording> {
         "Recording from {}... release the shortcut to stop.",
         device.unwrap_or(audio::DEFAULT_DEVICE)
     ));
-    audio::start(device, path)
+    // Ducking is a nicety; never let it block a recording.
+    if let Err(error) = media::start(config) {
+        log::log(&format!("Audio ducking failed: {error}"));
+    }
+    match audio::start(device, path) {
+        Ok(active) => Ok(active),
+        Err(error) => {
+            let _ = media::restore();
+            Err(error)
+        }
+    }
 }
 
 async fn finish_recording(active: audio::Recording) -> Result<()> {
     let total = Instant::now();
     let finished = active.stop()?;
+    if let Err(error) = media::restore() {
+        log::log(&format!("Audio restore failed: {error}"));
+    }
 
     if finished.duration < MIN_RECORDING {
         let _ = std::fs::remove_file(&finished.path);

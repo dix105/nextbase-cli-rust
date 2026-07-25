@@ -5,7 +5,7 @@ use nextbase_core::config::{
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
-use nextbase_core::{audio, autostart, hotkey, log, process_state, shortcut, storage, transcribe, verify};
+use nextbase_core::{audio, autostart, hotkey, log, media, process_state, shortcut, storage, transcribe, verify};
 use std::io::IsTerminal;
 
 use crate::ui;
@@ -495,8 +495,71 @@ pub async fn transcribe(file: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn media(_args: &[String]) -> Result<()> {
-    Err(not_yet("wisper media", "phase 3: platform layer"))
+pub fn media(args: &[String]) -> Result<()> {
+    let action = args
+        .first()
+        .map(|a| a.to_lowercase())
+        .unwrap_or_else(|| "status".into());
+
+    match action.as_str() {
+        "status" => {
+            let config = config::load();
+            ui::field(
+                "Audio ducking",
+                if config.audio_ducking == Some(false) { "disabled" } else { "enabled" },
+            );
+            ui::field(
+                "Duck volume",
+                &format!("{}%", config.audio_ducking_volume.unwrap_or(35)),
+            );
+            if !media::is_supported() {
+                ui::warn(&format!("Not supported on {}.", std::env::consts::OS));
+            }
+            Ok(())
+        }
+        "on" | "enable" | "enabled" => {
+            let volume = args.get(1).and_then(|v| v.parse::<u8>().ok()).unwrap_or(35).min(100);
+            config::update(|c| {
+                c.audio_ducking = Some(true);
+                c.audio_ducking_volume = Some(volume);
+            })?;
+            ui::success(&format!("Audio ducking enabled at {volume}%."));
+            Ok(())
+        }
+        "off" | "disable" | "disabled" => {
+            config::update(|c| c.audio_ducking = Some(false))?;
+            media::restore()?;
+            ui::success("Audio ducking disabled.");
+            Ok(())
+        }
+        "volume" => {
+            let volume = args
+                .get(1)
+                .and_then(|v| v.parse::<u8>().ok())
+                .context("Usage: wisper media volume <0-100>")?
+                .min(100);
+            config::update(|c| {
+                c.audio_ducking = Some(true);
+                c.audio_ducking_volume = Some(volume);
+            })?;
+            ui::success(&format!("Duck volume set to {volume}%."));
+            Ok(())
+        }
+        "test" => {
+            if !media::is_supported() {
+                bail!("Audio ducking is not supported on {}.", std::env::consts::OS);
+            }
+            let mut config = config::load();
+            config.audio_ducking = Some(true);
+            ui::info("Lowering volume for 2 seconds...");
+            media::start(&config)?;
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            media::restore()?;
+            ui::success("Volume restored.");
+            Ok(())
+        }
+        other => bail!("Usage: wisper media on|off|status|volume <0-100>|test (got \"{other}\")"),
+    }
 }
 
 pub fn autostart(args: &[String]) -> Result<()> {
@@ -794,6 +857,11 @@ pub fn doctor() -> Result<()> {
     Ok(())
 }
 
-pub fn open(_port: Option<u16>) -> Result<()> {
-    Err(not_yet("wisper open", "phase 5: dashboard"))
+pub async fn open(port: Option<u16>) -> Result<()> {
+    let url = crate::dashboard::serve(port.unwrap_or(3838)).await?;
+    crate::dashboard::open_in_browser(&url);
+    ui::success(&format!("Dashboard running at {url}"));
+    ui::hint("Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }

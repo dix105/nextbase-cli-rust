@@ -16,9 +16,10 @@ path = "src/bin/wisper.rs"
 nextbase-core = { path = "../nextbase-core" }
 anyhow.workspace = true
 serde_json.workspace = true
+axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 inquire = "0.7"
 indicatif = "0.17"
 owo-colors = "4"
 anstream = "0.6"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }

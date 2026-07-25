@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wisper</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #16181d;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --card: #f9fafb;
+    --accent: #2563eb;
+    --ok: #059669;
+    --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8ec; --muted: #9aa1ad;
+      --line: #23262e; --card: #16181d; --accent: #60a5fa;
+      --ok: #34d399; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .status {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px; margin-bottom: 24px;
+  }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .tile .v { font-size: 14px; margin-top: 3px; font-weight: 500; word-break: break-word; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--muted); }
+  .dot.warn { background: var(--warn); }
+  .bar { display: flex; gap: 8px; margin-bottom: 14px; }
+  input[type=search] {
+    flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font: inherit;
+  }
+  input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .count { color: var(--muted); font-size: 13px; align-self: center; white-space: nowrap; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px;
+    margin-bottom: 8px; background: var(--card);
+  }
+  .meta { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 5px; }
+  time, .src { color: var(--muted); font-size: 12px; }
+  .text { white-space: pre-wrap; word-break: break-word; }
+  .row { display: flex; gap: 6px; }
+  button {
+    font: inherit; font-size: 12px; padding: 4px 9px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  .empty { color: var(--muted); padding: 28px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Wisper</h1><span class="sub" id="listener"></span></header>
+  <div class="sub">Local dashboard. Nothing here leaves your machine.</div>
+
+  <div class="status" id="status"></div>
+
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search transcripts" autocomplete="off">
+    <span class="count" id="count"></span>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="empty" id="empty" hidden>No transcripts yet. Hold your shortcut and speak.</div>
+</div>
+
+<script>
+const escapeHtml = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+let history = [];
+
+function tile(k, v, dot) {
+  return `<div class="tile"><div class="k">${escapeHtml(k)}</div><div class="v">${
+    dot ? `<span class="dot ${dot}"></span>` : ''}${escapeHtml(v)}</div></div>`;
+}
+
+function renderStatus(state) {
+  const s = state.setup;
+  document.getElementById('status').innerHTML = [
+    tile('Provider', s.provider || 'not set', s.provider ? 'on' : 'off'),
+    tile('Model', s.model || 'not set'),
+    tile('Dictation', s.shortcut),
+    tile('Polish', s.polishShortcut),
+    tile('Spell fix', s.spellShortcut),
+    tile('Auto polish', s.autoPolish ? 'on' : 'off', s.autoPolish ? 'on' : 'off'),
+  ].join('');
+
+  const el = document.getElementById('listener');
+  if (state.listeners === 1) el.innerHTML = '<span class="dot on"></span>listener running';
+  else if (state.listeners === 0) el.innerHTML = '<span class="dot off"></span>listener stopped';
+  else el.innerHTML = `<span class="dot warn"></span>${state.listeners} listeners running`;
+}
+
+function renderList() {
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const rows = q ? history.filter((h) => h.text.toLowerCase().includes(q)) : history;
+
+  document.getElementById('count').textContent =
+    q ? `${rows.length} of ${history.length}` : `${history.length} total`;
+  document.getElementById('empty').hidden = history.length !== 0;
+
+  document.getElementById('list').innerHTML = rows.map((item) => `
+    <li>
+      <div class="meta">
+        <time>${escapeHtml(new Date(item.createdAt).toLocaleString())}</time>
+        <div class="row">
+          <button data-copy="${escapeHtml(item.id)}">Copy</button>
+          <button data-delete="${escapeHtml(item.id)}">Delete</button>
+        </div>
+      </div>
+      <div class="text">${escapeHtml(item.text)}</div>
+    </li>`).join('');
+}
+
+async function refresh() {
+  const response = await fetch('/api/state');
+  const state = await response.json();
+  history = state.history;
+  renderStatus(state);
+  renderList();
+}
+
+document.getElementById('q').addEventListener('input', renderList);
+
+document.addEventListener('click', async (event) => {
+  const copy = event.target.closest('[data-copy]');
+  if (copy) {
+    const item = history.find((h) => h.id === copy.dataset.copy);
+    await navigator.clipboard.writeText(item.text);
+    copy.textContent = 'Copied';
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+    return;
+  }
+
+  const del = event.target.closest('[data-delete]');
+  if (del) {
+    await fetch(`/api/history/${encodeURIComponent(del.dataset.delete)}`, { method: 'DELETE' });
+    await refresh();
+  }
+});
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

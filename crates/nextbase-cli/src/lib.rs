@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod commands;
+pub mod dashboard;
 pub mod listener;
 pub mod ui;
 
@@ -34,7 +35,7 @@ pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
         WisperCommand::ListenInternal => crate::listener::run().await,
         WisperCommand::Stop => commands::stop(),
         WisperCommand::Restart => commands::restart().await,
-        WisperCommand::Open { port } => commands::open(port),
+        WisperCommand::Open { port } => commands::open(port).await,
     }
 }
 
