@@ -11,6 +11,10 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Surfaced as job env so the signing step can test for its presence: the
+    # `secrets` context is not available in a step-level `if`.
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +38,9 @@ jobs:
       #   MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, MACOS_SIGNING_IDENTITY,
       #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
       - name: Sign and notarize (macOS)
-        if: runner.os == 'macOS' && secrets.MACOS_CERTIFICATE != ''
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
         env:
-          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE: ${{ env.MACOS_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
