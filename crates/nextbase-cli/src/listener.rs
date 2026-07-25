@@ -6,7 +6,6 @@
 //! written two ways is not registered twice.
 
 use anyhow::Result;
-use nextbase_core::config::Config;
 use nextbase_core::hotkey::{self, HotkeyEvent};
 use nextbase_core::{
     audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe,
@@ -180,7 +179,7 @@ pub async fn run() -> Result<()> {
                 if recording.is_some() {
                     continue;
                 }
-                match start_recording(&config) {
+                match start_recording() {
                     Ok(active) => recording = Some(active),
                     Err(error) => log::log(&format!("Could not start recording: {error}")),
                 }
@@ -244,7 +243,11 @@ fn drain(rx: &mut mpsc::UnboundedReceiver<Job>) {
     }
 }
 
-fn start_recording(config: &Config) -> Result<audio::Recording> {
+fn start_recording() -> Result<audio::Recording> {
+    // Reloaded every time: `wisper media off` and `wisper mic` must take effect
+    // without restarting the listener. Using the startup snapshot meant ducking
+    // kept happening after it had been turned off.
+    let config = config::load();
     let device = config.audio_device.as_deref();
     let path = audio::new_recording_path()?;
     log::log(&format!(
@@ -252,7 +255,7 @@ fn start_recording(config: &Config) -> Result<audio::Recording> {
         device.unwrap_or(audio::DEFAULT_DEVICE)
     ));
     // Ducking is a nicety; never let it block a recording.
-    if let Err(error) = media::start(config) {
+    if let Err(error) = media::start(&config) {
         log::log(&format!("Audio ducking failed: {error}"));
     }
     match audio::start(device, path) {

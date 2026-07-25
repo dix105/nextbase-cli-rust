@@ -34,25 +34,46 @@ fn set_volume(percent: u8) -> Result<()> {
     Ok(())
 }
 
+/// Core Audio endpoint for the default playback device.
+///
+/// This replaces an earlier attempt that pressed the volume-down media key N
+/// times. Those presses are *relative*, so ducking to "35%" walked the volume
+/// down from wherever it was and usually hit zero, and restoring computed zero
+/// presses and did nothing at all — leaving the volume stuck down.
+#[cfg(windows)]
+fn endpoint_volume() -> Result<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{
+        eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+
+    unsafe {
+        // RPC_E_CHANGED_MODE only means COM is already initialised on this thread
+        // with another model, which these calls do not care about.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+        Ok(device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)?)
+    }
+}
+
 #[cfg(windows)]
 fn read_volume() -> Option<u8> {
-    // Windows exposes no simple CLI for the master volume, so ducking restores to
-    // a remembered value only. 100 is the safe assumption for a first run.
-    Some(100)
+    unsafe {
+        let scalar = endpoint_volume().ok()?.GetMasterVolumeLevelScalar().ok()?;
+        Some((scalar * 100.0).round().clamp(0.0, 100.0) as u8)
+    }
 }
 
 #[cfg(windows)]
 fn set_volume(percent: u8) -> Result<()> {
-    // Nudges the master volume with the standard media keys via a WScript shim.
-    let steps = ((100 - percent as i32) / 2).clamp(0, 50);
-    let script = format!(
-        "$w = New-Object -ComObject WScript.Shell; 1..{steps} | ForEach-Object {{ $w.SendKeys([char]174) }}"
-    );
-    Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", &script])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+    unsafe {
+        endpoint_volume()?.SetMasterVolumeLevelScalar(f32::from(percent.min(100)) / 100.0, None)?;
+    }
     Ok(())
 }
 
@@ -90,16 +111,21 @@ pub fn start(config: &Config) -> Result<()> {
     set_volume(target)
 }
 
-pub fn restore() -> Result<()> {
+/// Put the volume back. Returns what it was restored to, or `None` if nothing was
+/// ducked in this process.
+pub fn restore() -> Result<Option<u8>> {
     if !is_supported() {
-        return Ok(());
+        return Ok(None);
     }
 
     let previous = PREVIOUS_VOLUME.lock().ok().and_then(|mut p| p.take());
-    if let Some(volume) = previous {
-        set_volume(volume)?;
+    match previous {
+        Some(volume) => {
+            set_volume(volume)?;
+            Ok(Some(volume))
+        }
+        None => Ok(None),
     }
-    Ok(())
 }
 
 pub fn current_volume() -> Option<u8> {

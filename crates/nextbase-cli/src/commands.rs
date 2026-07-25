@@ -597,6 +597,11 @@ pub fn media(args: &[String]) -> Result<()> {
                 "Duck volume",
                 &format!("{}%", config.audio_ducking_volume.unwrap_or(35)),
             );
+            // Worth showing: a bug here used to leave the system volume stuck down,
+            // and the setting alone does not reveal that.
+            if let Some(volume) = media::current_volume() {
+                ui::field("System volume", &format!("{volume}%"));
+            }
             if !media::is_supported() {
                 ui::warn(&format!("Not supported on {}.", std::env::consts::OS));
             }
@@ -617,8 +622,21 @@ pub fn media(args: &[String]) -> Result<()> {
         }
         "off" | "disable" | "disabled" => {
             config::update(|c| c.audio_ducking = Some(false))?;
-            media::restore()?;
-            ui::success("Audio ducking disabled.");
+            match media::restore()? {
+                Some(volume) => ui::success(&format!(
+                    "Audio ducking disabled. Volume restored to {volume}%."
+                )),
+                None => {
+                    ui::success("Audio ducking disabled.");
+                    // Only the process that ducked knows the old value.
+                    if let Some(volume) = media::current_volume() {
+                        ui::info(&format!("System volume is {volume}%."));
+                        if volume < 20 {
+                            ui::hint("If that is lower than you expect, set it back with your volume keys.");
+                        }
+                    }
+                }
+            }
             Ok(())
         }
         "volume" => {
@@ -644,9 +662,20 @@ pub fn media(args: &[String]) -> Result<()> {
             let mut config = config::load();
             config.audio_ducking = Some(true);
             ui::info("Lowering volume for 2 seconds...");
+            let before = media::current_volume();
             media::start(&config)?;
+            let ducked = media::current_volume();
             std::thread::sleep(std::time::Duration::from_secs(2));
             media::restore()?;
+            let after = media::current_volume();
+            if let (Some(before), Some(ducked), Some(after)) = (before, ducked, after) {
+                ui::field("Before", &format!("{before}%"));
+                ui::field("While recording", &format!("{ducked}%"));
+                ui::field("Restored to", &format!("{after}%"));
+                if after != before {
+                    ui::warn("Volume did not return to where it started.");
+                }
+            }
             ui::success("Volume restored.");
             Ok(())
         }
