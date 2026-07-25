@@ -150,11 +150,12 @@ async fn setup() -> Result<()> {
     {
         let key = crate::commands::ask_provider_key(Provider::Sarvam).await?;
         config::update(|c| {
+            // The key is shared on purpose — one Sarvam key serves both tools. The
+            // model is not: `model` belongs to Wisper, and writing it here would change
+            // what dictation uses.
             c.set_key(Provider::Sarvam, key);
-            // Shared config: only set the model if nothing usable is there, so this
-            // never overwrites a Wisper provider choice.
-            if c.model.is_none() {
-                c.model = Some("saaras:v3".into());
+            if c.meeting_model.is_none() {
+                c.meeting_model = Some(config::DEFAULT_MEETING_MODEL.to_string());
             }
         })?;
         ui::success("Sarvam key saved.");
@@ -401,6 +402,16 @@ async fn stop() -> Result<()> {
     transcribe_and_finish(&meeting).await
 }
 
+/// Progress goes to the log *and* the state file.
+///
+/// The log is for diagnosing afterwards; the state file is what lets `nbmeet status` and
+/// the dashboard show which step a queued Batch job is actually on, rather than an
+/// unchanging "transcribing" that looks identical to a hang.
+fn report_progress(message: &str) {
+    nextbase_core::log::log(message);
+    state::note_progress(message);
+}
+
 /// The gate, then the full run.
 async fn transcribe_and_finish(meeting: &state::ActiveMeeting) -> Result<()> {
     let settings = config::load();
@@ -430,12 +441,7 @@ async fn transcribe_and_finish(meeting: &state::ActiveMeeting) -> Result<()> {
     }
 
     let bar = ui::spinner("Transcribing a sample in both modes...");
-    let report = pipeline::run_sample_gate(meeting, &settings, &|message| {
-        // Progress goes to the log so the spinner stays readable; a stuck job is
-        // still diagnosable afterwards.
-        nextbase_core::log::log(message);
-    })
-    .await;
+    let report = pipeline::run_sample_gate(meeting, &settings, &report_progress).await;
     bar.finish_and_clear();
 
     let report = match report {
@@ -583,10 +589,7 @@ async fn run_full(meeting: &state::ActiveMeeting, mode: Mode) -> Result<()> {
     config::update(|c| c.meeting_mode = Some(mode.to_string()))?;
 
     let bar = ui::spinner(&format!("Transcribing the full recording in `{mode}`..."));
-    let completed = pipeline::finish(meeting, &settings, mode, &|message| {
-        nextbase_core::log::log(message);
-    })
-    .await;
+    let completed = pipeline::finish(meeting, &settings, mode, &report_progress).await;
     bar.finish_and_clear();
 
     let completed = match completed {
@@ -729,6 +732,13 @@ fn status() -> Result<()> {
                 format!("peak {:.3}, RMS {:.4}", level.peak, level.rms)
             },
         );
+    }
+    if let Some(progress) = &meeting.progress {
+        // With the age attached, a queued Batch job reads as waiting rather than stuck.
+        let age = state::progress_age_seconds(&meeting)
+            .map(|seconds| format!(" ({} ago)", clock(seconds)))
+            .unwrap_or_default();
+        ui::field("Last step", &format!("{progress}{age}"));
     }
     if let Some(error) = &meeting.error {
         ui::failure(error);
@@ -980,10 +990,18 @@ fn doctor() -> Result<()> {
             "off — full transcription runs immediately"
         },
     );
+    ui::field("Transcription model", settings.meeting_model_or_default());
+    ui::field("Summary model", settings.meeting_summary_model_or_default());
     ui::field(
         "Last approved mode",
         settings.meeting_mode.as_deref().unwrap_or("none yet"),
     );
+    // Named explicitly, because the two tools share this file and it should be obvious
+    // that changing one does not move the other.
+    ui::hint(&format!(
+        "Wisper's own model stays separate: {}",
+        settings.model.as_deref().unwrap_or("not set")
+    ));
     ui::field("Meetings", &paths::meetings_dir().display().to_string());
     Ok(())
 }

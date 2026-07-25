@@ -41,11 +41,9 @@ fn sarvam_key(config: &Config) -> Result<&str> {
 
 fn options(config: &Config, mode: Mode) -> BatchOptions {
     BatchOptions {
-        model: config
-            .model
-            .clone()
-            .filter(|model| model.starts_with("saaras"))
-            .unwrap_or_else(|| "saaras:v3".to_string()),
+        // The meeting model, never Wisper's: this tool needs Sarvam Batch, and Wisper's
+        // `model` may well be a Groq Whisper name.
+        model: config.meeting_model_or_default().to_string(),
         mode,
         // Left as detection unless the user pinned a language: guessing narrows the
         // model for no reason on code-mixed speech.

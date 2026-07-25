@@ -140,6 +140,16 @@ pub struct ActiveMeeting {
     pub approved_mode: Option<Mode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The most recent thing the pipeline said it was doing.
+    ///
+    /// Written here as well as to the log so the dashboard can show it. A Batch job can
+    /// queue for minutes, and "transcribing" with no further detail is
+    /// indistinguishable from a hang.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    /// When that message was recorded, so a stalled step is visible as a stale one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Per-source levels once recording has finished, so a source that stayed silent
@@ -172,6 +182,8 @@ impl ActiveMeeting {
             sample: None,
             approved_mode: None,
             note: None,
+            progress: None,
+            progress_at: None,
             error: None,
             source_levels: Vec::new(),
         }
@@ -227,6 +239,28 @@ pub fn update(change: impl FnOnce(&mut ActiveMeeting)) -> Result<Option<ActiveMe
     change(&mut meeting);
     save(&meeting)?;
     Ok(Some(meeting))
+}
+
+/// Record what the pipeline is doing, for `status` and the dashboard.
+///
+/// Deliberately quiet about failure: losing a progress line must never interrupt the
+/// work it was describing.
+pub fn note_progress(message: &str) {
+    let _ = update(|meeting| {
+        meeting.progress = Some(message.to_string());
+        meeting.progress_at = Some(chrono::Utc::now().to_rfc3339());
+    });
+}
+
+/// How long ago the last progress line was written.
+pub fn progress_age_seconds(meeting: &ActiveMeeting) -> Option<f64> {
+    let at = meeting.progress_at.as_ref()?;
+    chrono::DateTime::parse_from_rfc3339(at).ok().map(|stamp| {
+        (chrono::Utc::now() - stamp.with_timezone(&chrono::Utc))
+            .num_milliseconds()
+            .max(0) as f64
+            / 1000.0
+    })
 }
 
 pub fn clear() {

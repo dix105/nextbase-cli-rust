@@ -9,6 +9,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use nextbase_core::config::Provider;
 use nextbase_core::sarvam_batch::Mode;
 use nextbase_core::{autostart, config, paths, process_state, storage, wav};
 use nextbase_meeting::state::{self as meeting_state, Phase};
@@ -49,8 +50,17 @@ async fn delete_transcript(Path(id): Path<String>) -> impl IntoResponse {
 
 /// The active meeting, plus enough measured detail for the approval pane.
 async fn meeting() -> impl IntoResponse {
+    let settings = config::load();
+    let setup = json!({
+        "model": settings.meeting_model_or_default(),
+        "summaryModel": settings.meeting_summary_model_or_default(),
+        "gate": settings.meeting_gate_enabled(),
+        "mode": settings.meeting_mode,
+        "hasKey": settings.key_for(Provider::Sarvam).map(|key| !key.is_empty()).unwrap_or(false),
+    });
+
     let Some(active) = meeting_state::load() else {
-        return Json(json!({"active": false, "unfinished": unfinished_count()}));
+        return Json(json!({"active": false, "unfinished": unfinished_count(), "setup": setup}));
     };
 
     // Read the header rather than the recorder's intent: this is what is safely on
@@ -74,8 +84,13 @@ async fn meeting() -> impl IntoResponse {
         "sourceLevels": active.source_levels,
         "sample": active.sample,
         "approvedMode": active.approved_mode,
+        "progress": active.progress,
+        "progressAgeSeconds": meeting_state::progress_age_seconds(&active),
+        "imported": active.imported,
+        "gateBlocked": active.gate_blocked,
         "error": active.error,
         "unfinished": unfinished_count(),
+        "setup": setup,
     }))
 }
 
@@ -226,6 +241,121 @@ async fn import_audio(Json(body): Json<serde_json::Value>) -> impl IntoResponse 
     }
 }
 
+/// Receive an uploaded audio file and transcribe it.
+///
+/// A browser cannot give a page the path of a chosen file — only its contents — so the
+/// bytes are written next to the other meeting data and handed to `nbmeet audio`, which
+/// is the same path a typed path or URL takes.
+async fn upload_audio(
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(error) = nextbase_meeting::check_ready() {
+        return problem(StatusCode::BAD_REQUEST, &error.to_string());
+    }
+    if let Some(active) = meeting_state::load() {
+        if active.phase.is_capturing() || active.phase.is_processing() {
+            return problem(
+                StatusCode::CONFLICT,
+                &format!("Meeting {} is {}.", active.id, active.phase),
+            );
+        }
+    }
+    if config::load().meeting_consent != Some(true) {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "Run `nbmeet start` or `nbmeet audio` in a terminal once to confirm that audio is uploaded for transcription.",
+        );
+    }
+    if body.len() < 1024 {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "That file is only {} bytes, which is not audio.",
+                body.len()
+            ),
+        );
+    }
+
+    let uploads = paths::nextbase_dir().join("uploads");
+    // Yesterday's uploads are already copied into their meeting directories; this is
+    // the only place they get tidied, since the import copies rather than moves.
+    clean_old_uploads(&uploads);
+    if let Err(error) = std::fs::create_dir_all(&uploads) {
+        return problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+
+    let name = safe_file_name(&query_name(query.as_deref()).unwrap_or_else(|| "upload.wav".into()));
+    // The meeting id is minted by `nbmeet audio`; this only needs to be unique.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let path = uploads.join(format!("{stamp}-{name}"));
+    if let Err(error) = std::fs::write(&path, &body) {
+        return problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+
+    let source = path.to_string_lossy().to_string();
+    match autostart::spawn_sibling_detached("nbmeet", &["audio", &source]) {
+        Ok(_) => ok(json!({"name": name, "bytes": body.len()})),
+        Err(error) => problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+/// Pull `name=` out of the raw query string.
+///
+/// Hand-parsed rather than pulling serde into this crate for one optional field; the
+/// value is percent-decoded only as far as `%20`, since `safe_file_name` throws away
+/// everything unusual anyway.
+fn query_name(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "name").then(|| value.replace("%20", " ").replace('+', " "))
+    })
+}
+
+/// Keep only the basename, and only characters that are safe in one.
+///
+/// The name arrives from a browser; a `../` in it would otherwise choose where the file
+/// lands.
+fn safe_file_name(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', '-']).to_string();
+    if cleaned.is_empty() {
+        "upload.wav".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn clean_old_uploads(directory: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let cutoff = std::time::Duration::from_secs(6 * 60 * 60);
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified.elapsed().map(|age| age > cutoff).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 async fn approve_meeting(Path(mode): Path<String>) -> impl IntoResponse {
     let Some(active) = meeting_state::load() else {
         return problem(StatusCode::NOT_FOUND, "No meeting is waiting for approval.");
@@ -288,6 +418,12 @@ pub async fn serve(port: u16) -> Result<String> {
         .route("/api/meeting/start", post(start_meeting))
         .route("/api/meeting/stop", post(stop_meeting))
         .route("/api/meeting/audio", post(import_audio))
+        .route(
+            "/api/meeting/upload",
+            // Audio files are far larger than axum's 2 MB default. Raised only for this
+            // route, and the server is loopback-only.
+            post(upload_audio).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024 * 1024)),
+        )
         .route("/api/meeting/approve/{mode}", post(approve_meeting))
         .route("/api/meeting/reject", post(reject_meeting));
 

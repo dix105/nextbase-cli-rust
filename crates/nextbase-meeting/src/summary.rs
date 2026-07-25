@@ -82,7 +82,7 @@ pub async fn analyse(transcript: &str, config: &Config) -> Result<Analysis> {
         .context("Meeting summaries need a Groq API key. Run: nbmeet setup")?;
 
     let body = serde_json::json!({
-        "model": config.polish_model_or_default(),
+        "model": config.meeting_summary_model_or_default(),
         // Low but not zero: summarising needs to paraphrase, not invent.
         "temperature": 0.1,
         "response_format": {"type": "json_object"},

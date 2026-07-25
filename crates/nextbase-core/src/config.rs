@@ -13,6 +13,8 @@ pub const DEFAULT_SPELL_SHORTCUT: &str = "CommandOrControl+Alt+S";
 pub const DEFAULT_POLISH_MODEL: &str = "llama-3.3-70b-versatile";
 pub const DEFAULT_DUCKING_VOLUME: u8 = 35;
 pub const DEFAULT_UPDATE_INTERVAL_MINUTES: u64 = 180;
+/// Sarvam Batch model for meetings: long audio, diarization, code-mixed speech.
+pub const DEFAULT_MEETING_MODEL: &str = "saaras:v3";
 /// Floor for the update-check interval: GitHub rate-limits unauthenticated API
 /// calls, and a listener polling every minute would burn that allowance for nothing.
 pub const MIN_UPDATE_INTERVAL_MINUTES: u64 = 15;
@@ -153,6 +155,17 @@ pub struct Config {
     /// Require sample approval before every full transcription. Defaults to on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meeting_gate: Option<bool>,
+    /// Transcription model for meetings.
+    ///
+    /// Separate from `model`, which is Wisper's. The two tools share this file and the
+    /// API keys in it, but not their model choices: Wisper wants a fast short-clip model
+    /// and a meeting wants Sarvam Batch, so writing one would silently change the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_model: Option<String>,
+    /// Chat model for meeting summaries, separate from Wisper's polish model for the
+    /// same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_summary_model: Option<String>,
     /// Transcription mode the last approved sample settled on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meeting_mode: Option<String>,
@@ -205,6 +218,22 @@ impl Config {
         )
     }
 
+    /// The meeting transcription model. Never falls back to Wisper's `model`.
+    pub fn meeting_model_or_default(&self) -> &str {
+        self.meeting_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .unwrap_or(DEFAULT_MEETING_MODEL)
+    }
+
+    /// The meeting summary model. Never falls back to Wisper's `polish_model`.
+    pub fn meeting_summary_model_or_default(&self) -> &str {
+        self.meeting_summary_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .unwrap_or(DEFAULT_POLISH_MODEL)
+    }
+
     /// Whether a sample must be approved before the full transcription runs.
     pub fn meeting_gate_enabled(&self) -> bool {
         self.meeting_gate != Some(false)
@@ -250,6 +279,38 @@ pub fn update(edit: impl FnOnce(&mut Config)) -> Result<Config> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_meeting_model_never_borrows_wispers() {
+        // Wisper wants a fast short-clip model; a meeting needs Sarvam Batch. Sharing
+        // one field meant setting up either tool silently changed the other.
+        let mut config = Config {
+            model: Some("whisper-large-v3-turbo".into()),
+            polish_model: Some("llama-3.1-8b-instant".into()),
+            ..Default::default()
+        };
+        assert_eq!(config.meeting_model_or_default(), DEFAULT_MEETING_MODEL);
+        assert_eq!(
+            config.meeting_summary_model_or_default(),
+            DEFAULT_POLISH_MODEL
+        );
+
+        config.meeting_model = Some("saarika:v2.5".into());
+        config.meeting_summary_model = Some("llama-3.3-70b-versatile".into());
+        assert_eq!(config.meeting_model_or_default(), "saarika:v2.5");
+        // Wisper's own settings are untouched by any of this.
+        assert_eq!(config.model.as_deref(), Some("whisper-large-v3-turbo"));
+        assert_eq!(config.polish_model_or_default(), "llama-3.1-8b-instant");
+    }
+
+    #[test]
+    fn an_empty_meeting_model_falls_back_rather_than_sending_nothing() {
+        let config = Config {
+            meeting_model: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(config.meeting_model_or_default(), DEFAULT_MEETING_MODEL);
+    }
     use super::*;
 
     #[test]

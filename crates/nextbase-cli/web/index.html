@@ -192,6 +192,34 @@
   }
   .import input::placeholder { color: var(--ink-faint); font-family: var(--sans); }
 
+  .drop {
+    margin-top: 14px; border: 1px dashed var(--rule-strong); border-radius: var(--radius);
+    padding: 20px; text-align: center; transition: border-color 120ms ease, background 120ms ease;
+  }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop .big { font-size: 14px; }
+  .drop .or { color: var(--ink-faint); font-size: 12px; margin: 8px 0; }
+  .drop input[type=file] { display: none; }
+  .drop .picked { font: 12px/1.5 var(--mono); color: var(--accent); margin-top: 8px; word-break: break-all; }
+  .bar {
+    height: 4px; border-radius: 2px; background: var(--sunken);
+    overflow: hidden; margin-top: 12px;
+  }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width 180ms ease; }
+
+  /* A step that is running, with the provider's own state under it. */
+  .step { display: flex; align-items: center; gap: 9px; margin-top: 4px; }
+  .step .spinner {
+    width: 11px; height: 11px; border-radius: 50%; flex: none;
+    border: 2px solid var(--rule-strong); border-top-color: var(--accent);
+    animation: spin 900ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .step .spinner { animation: none; } }
+  .step .what { font-size: 13px; color: var(--ink); }
+  .step .ago { font: 11px/1 var(--mono); color: var(--ink-faint); }
+  .stale { color: var(--warn); }
+
   /* -------------------------------------------------------------- candidates */
   .candidates { display: grid; gap: 14px; margin-top: 16px; }
   @media (min-width: 760px) { .candidates.pair { grid-template-columns: 1fr 1fr; } }
@@ -281,6 +309,7 @@
 
   <!-- ----------------------------------------------------------- Meeting -->
   <section class="panel" id="panel-meeting" role="tabpanel" aria-labelledby="tab-meeting" hidden>
+    <dl class="facts" id="meeting-facts"></dl>
     <div id="meeting-live"></div>
 
     <h2 class="wordmark" style="font-size:15px;margin:26px 0 12px">Past meetings</h2>
@@ -410,16 +439,23 @@ const PHASE = {
   'failed': 'Failed',
 };
 
-const importBox = () => `<div class="import">
-    <input id="import-source" placeholder="/path/to/recording.m4a  or  https://example.com/audio.mp3"
+const importBox = () => `<div class="drop" id="drop">
+    <div class="big">Drop an audio file here</div>
+    <div class="or">or</div>
+    <label class="btn" for="file-input" style="display:inline-block">Choose a file…</label>
+    <input type="file" id="file-input" accept="audio/*,video/mp4,.m4a,.wav,.mp3,.flac,.ogg,.opus,.webm">
+    ${pickedName ? `<div class="picked">${escapeHtml(pickedName)}</div>` : ''}
+    ${uploadPercent != null ? `<div class="bar"><i style="width:${uploadPercent}%"></i></div>` : ''}
+  </div>
+  <div class="import">
+    <input id="import-source" placeholder="…or paste a path on this machine, or an https:// URL"
            aria-label="Audio file path or URL" value="${escapeHtml(importDraft)}">
     <button class="btn" data-action="import">Transcribe</button>
-  </div>
-  <p class="footnote" style="margin-top:9px">
-    A local path is read from this machine. Remote URLs are downloaded first.
-  </p>`;
+  </div>`;
 
 let importDraft = '';
+let pickedName = '';
+let uploadPercent = null;
 
 function levelRow(level) {
   // Scaled by RMS, not peak: one click would otherwise peg the meter for a minute.
@@ -459,7 +495,35 @@ function candidateCard(candidate) {
   </div>`;
 }
 
+/// The pipeline's own last word on what it is doing.
+function stepLine(meeting) {
+  if (!meeting.progress) return '';
+  const age = meeting.progressAgeSeconds;
+  // A step that has not spoken in two minutes is worth flagging: Batch jobs queue, but
+  // silence and a hang look the same without this.
+  const stale = age != null && age > 120;
+  return `<div class="step">
+    <span class="spinner"></span>
+    <span class="what">${escapeHtml(meeting.progress)}</span>
+    ${age != null ? `<span class="ago${stale ? ' stale' : ''}">${clock(age)} ago</span>` : ''}
+  </div>`;
+}
+
+function renderMeetingFacts(setup) {
+  if (!setup) return;
+  // Shown because the two tools share one config file: this makes it plain that the
+  // meeting model is its own setting and not Wisper's.
+  document.getElementById('meeting-facts').innerHTML = [
+    fact('Transcription', setup.model || 'not set', true),
+    fact('Summary', setup.summaryModel || 'not set', true),
+    fact('Sarvam key', setup.hasKey ? 'saved' : 'missing'),
+    fact('Sample gate', setup.gate ? 'on' : 'off'),
+    fact('Last mode', setup.mode || 'none yet', true),
+  ].join('');
+}
+
 function renderMeeting(meeting) {
+  renderMeetingFacts(meeting.setup);
   const host = document.getElementById('meeting-live');
   const badge = document.getElementById('meeting-badge');
 
@@ -510,9 +574,11 @@ function renderMeeting(meeting) {
       <h2>${escapeHtml(PHASE[meeting.phase] || meeting.phase)}</h2>
       <p class="lede">${escapeHtml(meeting.id)}</p>
       ${meeting.recordedSeconds != null ? `<div class="timer">${clock(meeting.recordedSeconds)}</div>` : ''}
+      ${meeting.processing ? stepLine(meeting) : ''}
       ${levels ? `<div class="levels">${levels}</div>` : ''}
       ${meeting.processing ? `<div class="notice plain">Sarvam Batch jobs queue, so this can take
         several minutes. Safe to close this tab — it keeps running.</div>` : ''}
+      ${meeting.gateBlocked ? `<div class="notice">${escapeHtml(meeting.gateBlocked)}</div>` : ''}
       ${meeting.phase === 'recorded' ? `<div class="actions">
         <button class="btn solid" data-action="process">Transcribe it</button></div>` : ''}
     </div>`;
@@ -596,6 +662,8 @@ async function refreshWisper() {
 
 async function refreshMeeting() {
   lastMeeting = await getJson('/api/meeting');
+  // A redraw mid-upload would drop the file input's state and the progress bar.
+  if (uploadPercent != null) return;
   // Keep whatever is being typed: this redraws every second while recording.
   const field = document.getElementById('import-source');
   if (field) importDraft = field.value;
@@ -628,6 +696,78 @@ async function refresh() {
 // ----------------------------------------------------------------- events
 
 document.getElementById('q').addEventListener('input', renderTranscripts);
+
+// ------------------------------------------------------------------ upload
+
+/// XHR rather than fetch: a large audio file deserves a progress bar, and fetch has no
+/// upload progress event.
+function uploadFile(file) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/meeting/upload?name=${encodeURIComponent(file.name)}`);
+    request.setRequestHeader('content-type', 'application/octet-stream');
+
+    request.upload.addEventListener('progress', (event) => {
+      if (!event.lengthComputable) return;
+      uploadPercent = Math.round((event.loaded / event.total) * 100);
+      renderMeeting(lastMeeting || { active: false, unfinished: 0 });
+    });
+    request.addEventListener('load', () => {
+      uploadPercent = null;
+      let payload = {};
+      try { payload = JSON.parse(request.responseText); } catch (_) {}
+      if (request.status >= 200 && request.status < 300) resolve(payload);
+      else reject(new Error(payload.error || `Upload failed: HTTP ${request.status}`));
+    });
+    request.addEventListener('error', () => {
+      uploadPercent = null;
+      reject(new Error('The upload failed.'));
+    });
+    request.send(file);
+  });
+}
+
+async function sendFile(file) {
+  if (!file) return;
+  pickedName = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  uploadPercent = 0;
+  renderMeeting(lastMeeting || { active: false, unfinished: 0 });
+  try {
+    await uploadFile(file);
+    pickedName = '';
+  } catch (error) {
+    pickedName = '';
+    alert(error.message);
+  }
+  await refresh();
+}
+
+document.addEventListener('change', (event) => {
+  if (event.target.id === 'file-input') sendFile(event.target.files[0]);
+});
+
+// Drag and drop over the whole zone, not just the button.
+for (const type of ['dragenter', 'dragover']) {
+  document.addEventListener(type, (event) => {
+    const zone = event.target.closest('#drop');
+    if (!zone) return;
+    event.preventDefault();
+    zone.classList.add('over');
+  });
+}
+document.addEventListener('dragleave', (event) => {
+  event.target.closest('#drop')?.classList.remove('over');
+});
+document.addEventListener('drop', (event) => {
+  const zone = event.target.closest('#drop');
+  if (!zone) return;
+  event.preventDefault();
+  zone.classList.remove('over');
+  sendFile(event.dataTransfer?.files?.[0]);
+});
+// Anywhere else, a dropped file would navigate away and lose the page.
+window.addEventListener('dragover', (event) => event.preventDefault());
+window.addEventListener('drop', (event) => event.preventDefault());
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && event.target.id === 'import-source') {
