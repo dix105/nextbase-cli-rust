@@ -4,6 +4,8 @@
 //! time, because by then the volume has already been changed.
 
 use anyhow::Result;
+// Only the macOS path shells out; Windows uses Core Audio directly.
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
