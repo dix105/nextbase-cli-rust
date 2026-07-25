@@ -84,6 +84,59 @@ pub fn has_permission() -> bool {
     }
 }
 
+/// Modifier state, independent of any terminal's key reporting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+}
+
+impl Mods {
+    pub fn count(&self) -> usize {
+        [self.ctrl, self.alt, self.shift, self.meta]
+            .iter()
+            .filter(|held| **held)
+            .count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+}
+
+/// What the capture tap saw.
+#[derive(Debug, Clone)]
+pub enum CaptureUpdate {
+    /// The held modifier set changed. Empty means everything was released.
+    Mods(Mods),
+    /// A non-modifier key went down while those modifiers were held.
+    Key { mods: Mods, key: String },
+}
+
+/// Observe raw key and modifier events until the returned handle is dropped.
+///
+/// This exists because a terminal cannot see a bare modifier press unless it
+/// implements the kitty keyboard protocol — Apple Terminal does not — so
+/// modifier-only combos like `Ctrl+Command` could never be captured by reading
+/// stdin. The event tap sees them regardless of which terminal is in use.
+///
+/// Key presses are swallowed while capturing, so a stray `Cmd+Q` cannot act on the
+/// focused app mid-capture.
+#[allow(unused_variables)]
+pub fn capture() -> Result<(std::sync::mpsc::Receiver<CaptureUpdate>, HotkeyHandle)> {
+    #[cfg(target_os = "macos")]
+    {
+        let (receiver, inner) = macos::capture()?;
+        Ok((receiver, HotkeyHandle { inner }))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("Live key capture is only implemented on macOS. Type the shortcut instead.")
+    }
+}
+
 pub fn permission_hint() -> &'static str {
     if cfg!(target_os = "macos") {
         "Grant Accessibility permission: System Settings > Privacy & Security > Accessibility, then add this binary (or your terminal) and restart the listener."

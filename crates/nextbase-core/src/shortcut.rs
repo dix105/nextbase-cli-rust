@@ -108,24 +108,96 @@ pub fn parse(shortcut: &str) -> Result<Parsed> {
     parse_with(shortcut, platform_control())
 }
 
+/// macOS virtual key codes. One table, used in both directions, so the
+/// label->code and code->label mappings cannot drift apart. Canonical spelling
+/// first: aliases like RETURN follow the name that should be displayed.
+const MAC_KEYS: [(&str, u16); 56] = [
+    ("A", 0),
+    ("S", 1),
+    ("D", 2),
+    ("F", 3),
+    ("H", 4),
+    ("G", 5),
+    ("Z", 6),
+    ("X", 7),
+    ("C", 8),
+    ("V", 9),
+    ("B", 11),
+    ("Q", 12),
+    ("W", 13),
+    ("E", 14),
+    ("R", 15),
+    ("Y", 16),
+    ("T", 17),
+    ("O", 31),
+    ("U", 32),
+    ("I", 34),
+    ("P", 35),
+    ("L", 37),
+    ("J", 38),
+    ("K", 40),
+    ("N", 45),
+    ("M", 46),
+    ("1", 18),
+    ("2", 19),
+    ("3", 20),
+    ("4", 21),
+    ("6", 22),
+    ("5", 23),
+    ("9", 25),
+    ("7", 26),
+    ("8", 28),
+    ("0", 29),
+    ("SPACE", 49),
+    ("TAB", 48),
+    ("ENTER", 36),
+    ("RETURN", 36),
+    ("ESC", 53),
+    ("ESCAPE", 53),
+    ("F1", 122),
+    ("F2", 120),
+    ("F3", 99),
+    ("F4", 118),
+    ("F5", 96),
+    ("F6", 97),
+    ("F7", 98),
+    ("F8", 100),
+    ("F9", 101),
+    ("F10", 109),
+    ("F11", 103),
+    ("F12", 111),
+    ("F13", 105),
+    ("F14", 107),
+];
+
+/// Codes above the main table, kept separate only to stay within one array literal.
+const MAC_KEYS_EXTRA: [(&str, u16); 6] = [
+    ("F15", 113),
+    ("F16", 106),
+    ("F17", 64),
+    ("F18", 79),
+    ("F19", 80),
+    ("F20", 90),
+];
+
+fn mac_key_table() -> impl Iterator<Item = &'static (&'static str, u16)> {
+    MAC_KEYS.iter().chain(MAC_KEYS_EXTRA.iter())
+}
+
 pub fn mac_key_code(key: &str) -> Result<u16> {
-    let code = match key {
-        "A" => 0, "S" => 1, "D" => 2, "F" => 3, "H" => 4, "G" => 5, "Z" => 6, "X" => 7,
-        "C" => 8, "V" => 9, "B" => 11, "Q" => 12, "W" => 13, "E" => 14, "R" => 15,
-        "Y" => 16, "T" => 17, "O" => 31, "U" => 32, "I" => 34, "P" => 35, "L" => 37,
-        "J" => 38, "K" => 40, "N" => 45, "M" => 46,
-        "1" => 18, "2" => 19, "3" => 20, "4" => 21, "6" => 22, "5" => 23, "9" => 25,
-        "7" => 26, "8" => 28, "0" => 29,
-        "SPACE" => 49, "TAB" => 48, "ENTER" | "RETURN" => 36, "ESC" | "ESCAPE" => 53,
-        "F1" => 122, "F2" => 120, "F3" => 99, "F4" => 118, "F5" => 96, "F6" => 97,
-        "F7" => 98, "F8" => 100, "F9" => 101, "F10" => 109, "F11" => 103, "F12" => 111,
-        "F13" => 105, "F14" => 107, "F15" => 113, "F16" => 106, "F17" => 64, "F18" => 79,
-        "F19" => 80, "F20" => 90,
-        other => bail!(
-            "Unsupported macOS shortcut key: {other}. Use A-Z, 0-9, Space, Tab, Enter, Esc, or F1-F20."
-        ),
-    };
-    Ok(code)
+    mac_key_table()
+        .find(|(label, _)| *label == key)
+        .map(|(_, code)| *code)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Unsupported macOS shortcut key: {key}. Use A-Z, 0-9, Space, Tab, Enter, Esc, or F1-F20."
+        ))
+}
+
+/// Reverse lookup, for turning a captured key event back into a shortcut string.
+pub fn mac_key_label(code: u16) -> Option<&'static str> {
+    mac_key_table()
+        .find(|(_, candidate)| *candidate == code)
+        .map(|(label, _)| *label)
 }
 
 pub fn windows_virtual_key(key: &str) -> Result<u32> {
@@ -276,6 +348,29 @@ mod tests {
     #[test]
     fn modifier_only_is_rejected_on_linux() {
         assert!(validate_with("Ctrl+Window", "linux").is_err());
+    }
+
+    #[test]
+    fn every_mac_key_round_trips() {
+        // A code->label mapping that disagrees with label->code would silently
+        // capture the wrong shortcut.
+        for (label, code) in mac_key_table() {
+            assert_eq!(mac_key_code(label).unwrap(), *code, "{label}");
+            let back = mac_key_label(*code).expect("code maps back to a label");
+            assert_eq!(
+                mac_key_code(back).unwrap(),
+                *code,
+                "{label} -> {code} -> {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_lookup_prefers_the_canonical_spelling() {
+        assert_eq!(mac_key_label(36), Some("ENTER"));
+        assert_eq!(mac_key_label(53), Some("ESC"));
+        assert_eq!(mac_key_label(9), Some("V"));
+        assert_eq!(mac_key_label(9999), None);
     }
 
     #[test]

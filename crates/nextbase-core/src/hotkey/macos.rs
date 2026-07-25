@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use super::HotkeyEvent;
+use super::{CaptureUpdate, HotkeyEvent, Mods};
 use crate::shortcut;
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -222,6 +222,115 @@ where
         Err(_) => {
             stop.store(true, Ordering::SeqCst);
             bail!("Timed out registering {shortcut_text}.")
+        }
+    }
+}
+
+fn mods_from_flags(flags: CGEventFlags) -> Mods {
+    Mods {
+        ctrl: flags.contains(CGEventFlags::CGEventFlagControl),
+        alt: flags.contains(CGEventFlags::CGEventFlagAlternate),
+        shift: flags.contains(CGEventFlags::CGEventFlagShift),
+        meta: flags.contains(CGEventFlags::CGEventFlagCommand),
+    }
+}
+
+/// Tap every modifier change and key press, for capturing a shortcut by pressing it.
+pub fn capture() -> Result<(mpsc::Receiver<CaptureUpdate>, MacHotkey)> {
+    if !is_trusted() {
+        bail!(
+            "Accessibility permission is required to capture a shortcut. {}",
+            super::permission_hint()
+        );
+    }
+
+    let (update_tx, update_rx) = mpsc::channel::<CaptureUpdate>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<RunLoopHandle>>();
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let worker = std::thread::spawn(move || {
+        let callback = move |_proxy: CGEventTapProxy,
+                             event_type: CGEventType,
+                             event: &CGEvent|
+              -> Option<CGEvent> {
+            match event_type {
+                CGEventType::FlagsChanged => {
+                    let _ = update_tx.send(CaptureUpdate::Mods(mods_from_flags(event.get_flags())));
+                    // Passed through: swallowing modifier changes can leave other
+                    // apps believing a modifier is stuck down.
+                    Some(event.clone())
+                }
+                CGEventType::KeyDown => {
+                    let code =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+                    if let Some(label) = shortcut::mac_key_label(code) {
+                        let _ = update_tx.send(CaptureUpdate::Key {
+                            mods: mods_from_flags(event.get_flags()),
+                            key: label.to_string(),
+                        });
+                    }
+                    // Swallowed, so the keypress being captured cannot also act on
+                    // whatever has focus.
+                    None
+                }
+                _ => Some(event.clone()),
+            }
+        };
+
+        let tap = match CGEventTap::new(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
+            callback,
+        ) {
+            Ok(tap) => tap,
+            Err(_) => {
+                let _ = ready_tx.send(Err(anyhow!(
+                    "Could not start key capture. {}",
+                    super::permission_hint()
+                )));
+                return;
+            }
+        };
+
+        let run_loop = CFRunLoop::get_current();
+        let source = match tap.mach_port.create_runloop_source(0) {
+            Ok(source) => source,
+            Err(_) => {
+                let _ = ready_tx.send(Err(anyhow!(
+                    "Could not attach key capture to the event loop."
+                )));
+                return;
+            }
+        };
+        unsafe {
+            run_loop.add_source(&source, kCFRunLoopCommonModes);
+        }
+        tap.enable();
+
+        if ready_tx.send(Ok(RunLoopHandle(run_loop))).is_err() {
+            return;
+        }
+        CFRunLoop::run_current();
+    });
+
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(run_loop)) => Ok((
+            update_rx,
+            MacHotkey {
+                stop,
+                run_loop: Some(run_loop),
+                worker: Some(worker),
+            },
+        )),
+        Ok(Err(error)) => {
+            let _ = worker.join();
+            Err(error)
+        }
+        Err(_) => {
+            stop.store(true, Ordering::SeqCst);
+            bail!("Timed out starting key capture.")
         }
     }
 }

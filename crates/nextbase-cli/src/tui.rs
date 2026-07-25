@@ -10,11 +10,13 @@ use anyhow::Result;
 use nextbase_core::audio::{Levels, Recording};
 use nextbase_core::shortcut;
 use ratatui::crossterm::event::{
-    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, ModifierKeyCode,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
+};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -37,17 +39,17 @@ impl Session {
         let mut out = stdout();
         enable_raw_mode()?;
 
-        // Lets supported terminals report key releases and F13-F24, which is what
-        // makes live modifier feedback and high F-keys possible at all. Apple
-        // Terminal ignores it; the UI degrades to press-only.
-        let enhanced = execute!(
+        // Ask the terminal whether it can report key releases and modifier keys
+        // before relying on it. Writing the escape sequence always "succeeds", so
+        // only this query distinguishes iTerm2/kitty/WezTerm from Apple Terminal.
+        let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+        let _ = execute!(
             out,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::REPORT_EVENT_TYPES
                     | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
-        )
-        .is_ok();
+        );
 
         let terminal = Terminal::with_options(
             Backend::new(stdout()),
@@ -73,33 +75,103 @@ impl Drop for Session {
 
 // ------------------------------------------------------------ shortcut capture
 
-/// The primary modifier is written as `CommandOrControl` so a captured shortcut
-/// still means the right thing if the config moves between macOS and Windows.
-fn modifier_labels(modifiers: KeyModifiers) -> Vec<&'static str> {
-    let mut parts = Vec::new();
-    let primary_is_super = cfg!(target_os = "macos");
+/// Modifiers currently held down.
+///
+/// Tracked from `KeyCode::Modifier` press/release events rather than the bitmask
+/// on a key event, because a bare modifier press carries no key — which is exactly
+/// why pressing Ctrl+Win used to do nothing here.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub sup: bool,
+}
 
-    if modifiers.contains(KeyModifiers::SUPER) {
-        parts.push(if primary_is_super {
-            "CommandOrControl"
-        } else {
-            "Win"
-        });
+impl Held {
+    fn from_mods(mods: nextbase_core::hotkey::Mods) -> Self {
+        Self {
+            ctrl: mods.ctrl,
+            alt: mods.alt,
+            shift: mods.shift,
+            sup: mods.meta,
+        }
     }
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        parts.push(if primary_is_super {
-            "Ctrl"
-        } else {
-            "CommandOrControl"
-        });
+
+    fn from_bitmask(modifiers: KeyModifiers) -> Self {
+        Self {
+            ctrl: modifiers.contains(KeyModifiers::CONTROL),
+            alt: modifiers.contains(KeyModifiers::ALT),
+            shift: modifiers.contains(KeyModifiers::SHIFT),
+            sup: modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META),
+        }
     }
-    if modifiers.contains(KeyModifiers::ALT) {
-        parts.push("Alt");
+
+    fn set(&mut self, key: ModifierKeyCode, down: bool) {
+        match key {
+            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => self.ctrl = down,
+            ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => self.alt = down,
+            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => self.shift = down,
+            ModifierKeyCode::LeftSuper
+            | ModifierKeyCode::RightSuper
+            | ModifierKeyCode::LeftMeta
+            | ModifierKeyCode::RightMeta => self.sup = down,
+            _ => {}
+        }
     }
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        parts.push("Shift");
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            ctrl: self.ctrl || other.ctrl,
+            alt: self.alt || other.alt,
+            shift: self.shift || other.shift,
+            sup: self.sup || other.sup,
+        }
     }
-    parts
+
+    pub(crate) fn count(&self) -> usize {
+        [self.ctrl, self.alt, self.shift, self.sup]
+            .iter()
+            .filter(|held| **held)
+            .count()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+
+    /// The primary modifier is normally written `CommandOrControl`, so a captured
+    /// shortcut still means the right thing on the other platform. When both
+    /// primaries are held the distinction matters, so name them explicitly.
+    pub(crate) fn labels(&self) -> Vec<&'static str> {
+        let mac = cfg!(target_os = "macos");
+        let both_primaries = self.ctrl && self.sup;
+        let mut parts = Vec::new();
+
+        if self.sup {
+            parts.push(if !mac {
+                "Win"
+            } else if both_primaries {
+                "Command"
+            } else {
+                "CommandOrControl"
+            });
+        }
+        if self.ctrl {
+            parts.push(if mac || both_primaries {
+                "Ctrl"
+            } else {
+                "CommandOrControl"
+            });
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        parts
+    }
 }
 
 fn key_label(code: KeyCode) -> Option<String> {
@@ -121,6 +193,20 @@ fn is_standalone(key: &str) -> bool {
         .is_some_and(|n| (1..=24).contains(&n))
 }
 
+/// Builds the shortcut string shown while keys are going down, so each press
+/// appears as it happens: `Ctrl`, then `Ctrl + Command`, then `Ctrl + Command + K`.
+pub(crate) fn preview_of(held: Held, pending: bool) -> String {
+    let parts = held.labels();
+    if parts.is_empty() {
+        return "press your shortcut".to_string();
+    }
+    let mut text = parts.join(" + ");
+    if pending {
+        text.push_str(" + …");
+    }
+    text
+}
+
 /// What the capture UI shows. Kept separate from the event loop so the rendering
 /// can be tested against a `TestBackend` — an inline viewport needs a terminal that
 /// answers a cursor-position query, which no test harness does.
@@ -128,11 +214,12 @@ pub(crate) struct CaptureView<'a> {
     pub label: &'a str,
     pub current: &'a str,
     pub preview: &'a str,
+    pub note: Option<&'a str>,
     pub error: Option<&'a str>,
 }
 
 pub(crate) fn draw_capture(frame: &mut ratatui::Frame, view: &CaptureView) {
-    let rows = Layout::vertical([Constraint::Length(1); 6]).split(frame.area());
+    let rows = Layout::vertical([Constraint::Length(1); 7]).split(frame.area());
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -158,13 +245,23 @@ pub(crate) fn draw_capture(frame: &mut ratatui::Frame, view: &CaptureView) {
         rows[2],
     );
 
+    if let Some(note) = view.note {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                note.to_string(),
+                Style::default().fg(Color::Green),
+            ))),
+            rows[3],
+        );
+    }
+
     if let Some(text) = view.error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 text.to_string(),
                 Style::default().fg(Color::Red),
             ))),
-            rows[3],
+            rows[4],
         );
     }
 
@@ -173,25 +270,54 @@ pub(crate) fn draw_capture(frame: &mut ratatui::Frame, view: &CaptureView) {
             "Esc to type it instead   ·   Ctrl+C to cancel",
             Style::default().fg(Color::DarkGray),
         ))),
-        rows[5],
+        rows[6],
     );
 }
 
 /// Capture a shortcut by pressing it. `Ok(None)` means the user chose to type it
-/// instead, which is the escape hatch for modifier-only combos and for terminals
-/// that swallow the key.
+/// instead.
+///
+/// Two gestures are accepted: modifiers plus a key, or modifiers alone released
+/// together — the second is how `Ctrl+Command` style shortcuts get captured, and it
+/// needs a terminal that reports modifier keys.
 pub fn capture_shortcut(label: &str, current: &str) -> Result<Option<String>> {
-    let mut session = Session::new(9)?;
-    let mut held = KeyModifiers::NONE;
+    // The event tap sees modifier keys in any terminal, so prefer it. Reading stdin
+    // can only see them where the terminal implements the kitty keyboard protocol,
+    // which Apple Terminal does not.
+    match capture_via_event_tap(label, current) {
+        Ok(result) => return Ok(result),
+        Err(error) => {
+            let reason = error.to_string();
+            if reason.starts_with("Cancelled") {
+                return Err(error);
+            }
+            // No permission, or not macOS: fall through to reading stdin.
+        }
+    }
+    capture_via_stdin(label, current)
+}
+
+/// Capture through the CGEventTap. Works regardless of terminal, and is the only
+/// way to capture a modifier-only combo such as `Ctrl+Command`.
+fn capture_via_event_tap(label: &str, current: &str) -> Result<Option<String>> {
+    let (updates, handle) = nextbase_core::hotkey::capture()?;
+    let mut session = Session::new(10)?;
+
+    let mut held = Held::default();
+    let mut peak = Held::default();
+    let mut pressed_normal = false;
     let mut error: Option<String> = None;
     let mut captured: Option<String> = None;
 
     loop {
-        let held_parts = modifier_labels(held);
-        let preview = if held_parts.is_empty() {
-            "hold Ctrl / Alt / Shift / Cmd, then press a key".to_string()
+        let preview = preview_of(held, !held.is_empty());
+        let note = if held.count() >= 2 && !pressed_normal {
+            Some(format!(
+                "Release both keys to use {} on its own, or press a key to add one.",
+                held.labels().join(" + ")
+            ))
         } else {
-            format!("{} + …", held_parts.join(" + "))
+            None
         };
         let error_text = error.clone();
 
@@ -202,6 +328,150 @@ pub fn capture_shortcut(label: &str, current: &str) -> Result<Option<String>> {
                     label,
                     current,
                     preview: &preview,
+                    note: note.as_deref(),
+                    error: error_text.as_deref(),
+                },
+            )
+        })?;
+
+        // Esc and Ctrl+C still come from stdin: the tap swallows key presses, so
+        // this is the reliable way out.
+        if event::poll(Duration::from_millis(40))? {
+            if let event::Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            }) = event::read()?
+            {
+                if kind != KeyEventKind::Release {
+                    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                        handle.stop();
+                        return Err(anyhow::anyhow!("Cancelled."));
+                    }
+                    if code == KeyCode::Esc {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Ok(update) = updates.recv_timeout(Duration::from_millis(60)) else {
+            continue;
+        };
+
+        match update {
+            nextbase_core::hotkey::CaptureUpdate::Mods(mods) => {
+                let next = Held::from_mods(mods);
+                if held.is_empty() && !next.is_empty() {
+                    // First modifier down starts a fresh gesture.
+                    peak = Held::default();
+                    pressed_normal = false;
+                    error = None;
+                }
+                held = next;
+                peak = peak.union(held);
+
+                if held.is_empty() {
+                    if !pressed_normal && peak.count() >= 2 {
+                        let combo = peak.labels().join("+");
+                        match shortcut::validate(&combo) {
+                            Ok(()) => {
+                                captured = Some(combo);
+                                break;
+                            }
+                            Err(reason) => error = Some(reason.to_string()),
+                        }
+                    } else if !pressed_normal && peak.count() == 1 {
+                        error = Some(
+                            "One modifier on its own is not a shortcut. Hold two, or add a key."
+                                .to_string(),
+                        );
+                    }
+                    peak = Held::default();
+                    pressed_normal = false;
+                }
+            }
+            nextbase_core::hotkey::CaptureUpdate::Key { mods, key } => {
+                // Esc arrives through the tap too; treat it as "type it instead".
+                if key == "ESC" {
+                    break;
+                }
+                held = held.union(Held::from_mods(mods));
+                peak = peak.union(held);
+                pressed_normal = true;
+
+                let parts = held.labels();
+                if parts.is_empty() && !is_standalone(&key) {
+                    error = Some(format!(
+                        "{key} alone would capture every keypress. Add a modifier, or use F13-F24."
+                    ));
+                    continue;
+                }
+
+                let mut combo = parts.join("+");
+                if !combo.is_empty() {
+                    combo.push('+');
+                }
+                combo.push_str(&key);
+
+                match shortcut::validate(&combo) {
+                    Ok(()) => {
+                        captured = Some(combo);
+                        break;
+                    }
+                    Err(reason) => error = Some(reason.to_string()),
+                }
+            }
+        }
+    }
+
+    handle.stop();
+    Ok(captured)
+}
+
+/// Fallback for when the event tap is unavailable: read stdin. Cannot see bare
+/// modifier presses unless the terminal reports them.
+fn capture_via_stdin(label: &str, current: &str) -> Result<Option<String>> {
+    let mut session = Session::new(10)?;
+
+    let mut held = Held::default();
+    // Largest set held during this gesture, so releasing keys one at a time still
+    // yields the whole combo.
+    let mut peak = Held::default();
+    let mut pressed_normal = false;
+    let mut error: Option<String> = None;
+    let mut captured: Option<String> = None;
+
+    let unsupported_note = if session.enhanced {
+        None
+    } else {
+        Some(
+            "This terminal does not report modifier keys, so modifier-only combos cannot be captured. Press Esc to type one."
+                .to_string(),
+        )
+    };
+
+    loop {
+        let preview = preview_of(held, !held.is_empty());
+        let note = if held.count() >= 2 && !pressed_normal {
+            Some(format!(
+                "Release both keys to use {} on its own, or press a key to add one.",
+                held.labels().join(" + ")
+            ))
+        } else {
+            unsupported_note.clone()
+        };
+        let error_text = error.clone();
+
+        session.terminal.draw(|frame| {
+            draw_capture(
+                frame,
+                &CaptureView {
+                    label,
+                    current,
+                    preview: &preview,
+                    note: note.as_deref(),
                     error: error_text.as_deref(),
                 },
             )
@@ -221,25 +491,68 @@ pub fn capture_shortcut(label: &str, current: &str) -> Result<Option<String>> {
             continue;
         };
 
-        // Without keyboard enhancements only presses arrive, so `held` simply
-        // tracks the modifiers reported with each press.
-        if kind == KeyEventKind::Release {
-            held = modifiers;
-            continue;
-        }
-        held = modifiers;
-
-        if code == KeyCode::Esc {
-            break;
-        }
-        if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-            // Ctrl+C is a plausible shortcut, but cancelling has to win.
+        // Cancelling has to win over capturing Ctrl+C as a shortcut.
+        if kind != KeyEventKind::Release
+            && code == KeyCode::Char('c')
+            && modifiers.contains(KeyModifiers::CONTROL)
+        {
             return Err(anyhow::anyhow!("Cancelled."));
         }
+        if kind != KeyEventKind::Release && code == KeyCode::Esc {
+            break;
+        }
+
+        if let KeyCode::Modifier(modifier) = code {
+            match kind {
+                KeyEventKind::Press | KeyEventKind::Repeat => {
+                    // First modifier down starts a fresh gesture.
+                    if held.is_empty() {
+                        peak = Held::default();
+                        pressed_normal = false;
+                    }
+                    held.set(modifier, true);
+                    peak = peak.union(held);
+                    error = None;
+                }
+                KeyEventKind::Release => {
+                    held.set(modifier, false);
+                    if held.is_empty() {
+                        if !pressed_normal && peak.count() >= 2 {
+                            let combo = peak.labels().join("+");
+                            match shortcut::validate(&combo) {
+                                Ok(()) => {
+                                    captured = Some(combo);
+                                    break;
+                                }
+                                Err(reason) => error = Some(reason.to_string()),
+                            }
+                        } else if !pressed_normal && peak.count() == 1 {
+                            error = Some(
+                                "One modifier on its own is not a shortcut. Hold two, or add a key."
+                                    .to_string(),
+                            );
+                        }
+                        peak = Held::default();
+                        pressed_normal = false;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if kind == KeyEventKind::Release {
+            continue;
+        }
+
+        // A real key carries a reliable modifier bitmask, which also covers
+        // terminals that never send modifier key events.
+        held = held.union(Held::from_bitmask(modifiers));
+        peak = peak.union(held);
 
         let Some(key) = key_label(code) else { continue };
-        let parts = modifier_labels(modifiers);
+        pressed_normal = true;
 
+        let parts = held.labels();
         if parts.is_empty() && !is_standalone(&key) {
             error = Some(format!(
                 "{key} alone would capture every keypress. Add a modifier, or use F13-F24."
@@ -396,6 +709,7 @@ mod tests {
                     label: "Dictation",
                     current: "Ctrl+Window",
                     preview: "CommandOrControl + Alt + …",
+                    note: None,
                     error: None,
                 },
             )
@@ -415,6 +729,7 @@ mod tests {
                     label: "Polish",
                     current: "F15",
                     preview: "Alt + …",
+                    note: None,
                     error: Some("Unsupported macOS shortcut key: F30."),
                 },
             )
@@ -469,10 +784,92 @@ mod tests {
 
     #[test]
     fn primary_modifier_is_written_portably() {
-        let labels = modifier_labels(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let held = Held {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        let labels = held.labels();
         assert!(labels.contains(&"Alt"));
         // Whichever key is primary on this platform, it is spelled the portable way.
         assert!(labels.contains(&"CommandOrControl") || labels.contains(&"Ctrl"));
+    }
+
+    #[test]
+    fn ctrl_plus_win_captures_as_a_modifier_only_shortcut() {
+        // The reported bug: this combo did nothing in the capture UI.
+        let held = Held {
+            ctrl: true,
+            sup: true,
+            ..Default::default()
+        };
+        let combo = held.labels().join("+");
+        assert!(
+            shortcut::validate(&combo).is_ok(),
+            "{combo} must be a valid shortcut"
+        );
+        // Whatever it is called on this platform, it means the same two physical keys
+        // as the config the TypeScript build wrote.
+        assert_eq!(
+            shortcut::normalize(&combo),
+            shortcut::normalize("Ctrl+Window")
+        );
+    }
+
+    #[test]
+    fn both_primaries_held_are_named_explicitly() {
+        // "CommandOrControl+Ctrl" would be nonsense to read, so once both are down
+        // they get their real names.
+        let held = Held {
+            ctrl: true,
+            sup: true,
+            ..Default::default()
+        };
+        let labels = held.labels();
+        assert!(!labels.contains(&"CommandOrControl"), "{labels:?}");
+        assert!(labels.contains(&"Ctrl"), "{labels:?}");
+    }
+
+    #[test]
+    fn preview_grows_as_keys_go_down() {
+        assert_eq!(preview_of(Held::default(), false), "press your shortcut");
+
+        let one = Held {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(preview_of(one, true), format!("{} + …", one.labels()[0]));
+
+        let two = Held {
+            ctrl: true,
+            sup: true,
+            ..Default::default()
+        };
+        let shown = preview_of(two, true);
+        assert!(shown.contains(" + "), "{shown}");
+        assert!(shown.ends_with(" + …"), "{shown}");
+        assert_eq!(preview_of(two, false), two.labels().join(" + "));
+    }
+
+    #[test]
+    fn a_single_modifier_is_not_enough() {
+        assert_eq!(
+            Held {
+                ctrl: true,
+                ..Default::default()
+            }
+            .count(),
+            1
+        );
+        assert_eq!(
+            Held {
+                ctrl: true,
+                sup: true,
+                ..Default::default()
+            }
+            .count(),
+            2
+        );
     }
 
     #[test]

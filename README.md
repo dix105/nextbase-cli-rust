@@ -141,15 +141,21 @@ an auth failure.
 - API keys are entered masked, and a key is only saved once it verifies. The
   TypeScript setup printed the verification failure and saved the key anyway.
 - `ratatui` drives the two genuinely live moments, both as an **inline viewport** so
-  scrollback survives: press-to-capture for shortcuts (with modifiers previewed live
-  and validation shown in place) and a mic level meter while recording. It uses the
-  crossterm that `ratatui` re-exports, so only one version of it ever touches raw
-  mode. A full-screen `wisper dash` would be the next candidate.
+  scrollback survives: press-to-capture for shortcuts and a mic level meter while
+  recording. A full-screen `wisper dash` would be the next candidate.
 
-  Two details worth keeping: the meter is scaled to roughly -60..0 dB, because speech
-  sits around 0.01-0.3 and a linear bar looks dead; and capture asks the terminal for
-  keyboard enhancements, which is what makes F13-F24 and live modifier feedback
-  possible where the terminal supports it.
+  **Shortcut capture reads the CGEventTap, not stdin.** A terminal cannot see a bare
+  modifier press unless it implements the kitty keyboard protocol, and Apple Terminal
+  does not — which is why modifier-only combos like `Ctrl+Command` appeared to do
+  nothing when capture read stdin. The tap sees them in any terminal. Each key shows
+  up as it goes down (`Ctrl`, then `Ctrl + Command`), and releasing modifiers together
+  without pressing a key captures the combo on its own. Key presses are swallowed
+  during capture so a stray `Cmd+Q` cannot act on the focused app. Without
+  Accessibility permission it falls back to reading stdin, and Esc always drops to
+  typing.
+
+  The meter is scaled to roughly -60..0 dB, because speech sits around 0.01-0.3 and a
+  linear bar looks dead.
 
 ## Phases
 
@@ -194,8 +200,8 @@ an auth failure.
   that fails, capture says so and falls back to typing — verified by driving it
   through a bare pty. The drawing itself is covered by `TestBackend` tests, but its
   on-screen layout is only confirmed by running it in a real terminal.
-- Modifier-only combos like `Ctrl+Command` still have to be typed: a terminal cannot
-  observe a held modifier with no key. `wisper shortcut Ctrl+Command` works.
+- Live capture of modifier-only combos is macOS-only, since it depends on the event
+  tap. On Windows, type them: `wisper shortcut Ctrl+Win`.
 
 ## Development
 
