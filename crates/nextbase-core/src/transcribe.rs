@@ -82,9 +82,7 @@ fn audio_part(path: &Path) -> Result<Part> {
         path.extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .as_deref(),
-        Some(
-            "wav" | "mp3" | "flac" | "m4a" | "ogg" | "opus" | "webm" | "mp4" | "mpeg" | "mpga"
-        )
+        Some("wav" | "mp3" | "flac" | "m4a" | "ogg" | "opus" | "webm" | "mp4" | "mpeg" | "mpga")
     );
     let file_name = if known { name } else { format!("{name}.wav") };
 
@@ -259,7 +257,10 @@ mod tests {
     #[test]
     fn transcript_is_read_from_either_field_name() {
         assert_eq!(transcript_from(&json!({"text": " hi "})), "hi");
-        assert_eq!(transcript_from(&json!({"transcript": "namaste"})), "namaste");
+        assert_eq!(
+            transcript_from(&json!({"transcript": "namaste"})),
+            "namaste"
+        );
         assert_eq!(transcript_from(&json!({})), "");
     }
 

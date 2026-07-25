@@ -15,10 +15,7 @@ use serde_json::json;
 const PAGE: &str = include_str!("../web/index.html");
 
 async fn index() -> impl IntoResponse {
-    (
-        [(header::CACHE_CONTROL, "no-store")],
-        Html(PAGE),
-    )
+    ([(header::CACHE_CONTROL, "no-store")], Html(PAGE))
 }
 
 async fn state() -> impl IntoResponse {

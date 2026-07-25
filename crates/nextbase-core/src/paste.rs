@@ -25,7 +25,9 @@ pub fn read_clipboard() -> Result<String> {
 }
 
 pub fn write_clipboard(text: &str) -> Result<()> {
-    clipboard()?.set_text(text.to_string()).map_err(|e| anyhow!(e))
+    clipboard()?
+        .set_text(text.to_string())
+        .map_err(|e| anyhow!(e))
 }
 
 // ------------------------------------------------------------------- macOS

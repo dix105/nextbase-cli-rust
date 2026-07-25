@@ -56,9 +56,9 @@ pub fn other_listener_pids() -> Vec<u32> {
                 return false;
             }
             // Only our own listeners: the marker alone is too generic.
-            command
-                .iter()
-                .any(|part| part.contains("wisper") || part.contains("nextbase") || part.contains("cli.js"))
+            command.iter().any(|part| {
+                part.contains("wisper") || part.contains("nextbase") || part.contains("cli.js")
+            })
         })
         .map(|(pid, _)| pid.as_u32())
         .collect();

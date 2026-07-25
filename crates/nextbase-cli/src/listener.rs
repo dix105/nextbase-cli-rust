@@ -8,7 +8,9 @@
 use anyhow::Result;
 use nextbase_core::config::Config;
 use nextbase_core::hotkey::{self, HotkeyEvent};
-use nextbase_core::{audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe};
+use nextbase_core::{
+    audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe,
+};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -184,7 +186,9 @@ pub async fn run() -> Result<()> {
                 }
             }
             Job::Dictation(HotkeyEvent::Up) => {
-                let Some(active) = recording.take() else { continue };
+                let Some(active) = recording.take() else {
+                    continue;
+                };
                 if let Err(error) = finish_recording(active).await {
                     log::log(&format!("Error: {error}"));
                 }
@@ -234,7 +238,9 @@ fn drain(rx: &mut mpsc::UnboundedReceiver<Job>) {
         dropped += 1;
     }
     if dropped > 0 {
-        log::log(&format!("Ignored {dropped} shortcut event(s) received while busy."));
+        log::log(&format!(
+            "Ignored {dropped} shortcut event(s) received while busy."
+        ));
     }
 }
 
@@ -340,7 +346,9 @@ async fn rewrite_focused_input() -> Result<()> {
     log::log("Fixing spelling in focused input...");
     let text = paste::copy_focused_input_text()?;
     if text.is_empty() {
-        anyhow::bail!("Focus an editable text field with content first, then press the spell-fix shortcut.");
+        anyhow::bail!(
+            "Focus an editable text field with content first, then press the spell-fix shortcut."
+        );
     }
 
     let config = config::load();

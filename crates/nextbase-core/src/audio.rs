@@ -232,8 +232,6 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
         let error_callback = |error| eprintln!("Microphone stream error: {error}");
 
         let stream = {
-            let write_frames = write_frames.clone();
-            let to_mono = to_mono.clone();
             let build = |device: &cpal::Device| -> Result<cpal::Stream, cpal::BuildStreamError> {
                 match sample_format {
                     cpal::SampleFormat::F32 => {
@@ -271,8 +269,7 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
                             move |data: &[u16], _| {
                                 floats.clear();
                                 floats.extend(
-                                    data.iter()
-                                        .map(|s| (*s as f32 - 32768.0) / i16::MAX as f32),
+                                    data.iter().map(|s| (*s as f32 - 32768.0) / i16::MAX as f32),
                                 );
                                 to_mono(&floats, &mut scratch);
                                 write_frames(&scratch);
@@ -283,7 +280,7 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
                     }
                     other => {
                         eprintln!("Unsupported microphone sample format: {other:?}");
-                        return Err(cpal::BuildStreamError::StreamConfigNotSupported);
+                        Err(cpal::BuildStreamError::StreamConfigNotSupported)
                     }
                 }
             };
@@ -358,9 +355,17 @@ pub struct DeviceProbe {
 /// live input, so they are ranked last rather than hidden.
 pub fn is_likely_virtual(device: &str) -> bool {
     let name = device.to_lowercase();
-    ["virtual", "relay", "cable", "vb-audio", "voicemeeter", "loopback", "aggregate"]
-        .iter()
-        .any(|marker| name.contains(marker))
+    [
+        "virtual",
+        "relay",
+        "cable",
+        "vb-audio",
+        "voicemeeter",
+        "loopback",
+        "aggregate",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 pub fn list_input_devices() -> Vec<String> {
@@ -440,7 +445,10 @@ pub fn auto_detect_input_device(configured: Option<&str>) -> AutoDetect {
         }
     }
 
-    let probes: Vec<DeviceProbe> = ordered.iter().map(|name| probe_input_device(name)).collect();
+    let probes: Vec<DeviceProbe> = ordered
+        .iter()
+        .map(|name| probe_input_device(name))
+        .collect();
 
     let mut usable: Vec<&DeviceProbe> = probes.iter().filter(|probe| probe.ok).collect();
     usable.sort_by(|a, b| {
@@ -506,13 +514,24 @@ mod tests {
 
     #[test]
     fn silence_uses_the_field_tuned_floor() {
-        assert!(Levels { peak: 0.00005, rms: 0.00001 }.is_silent());
-        assert!(!Levels { peak: 0.02, rms: 0.005 }.is_silent());
+        assert!(Levels {
+            peak: 0.00005,
+            rms: 0.00001
+        }
+        .is_silent());
+        assert!(!Levels {
+            peak: 0.02,
+            rms: 0.005
+        }
+        .is_silent());
     }
 
     #[test]
     fn rms_is_weighted_up_when_scoring_devices() {
-        let quiet_but_steady = Levels { peak: 0.05, rms: 0.02 };
+        let quiet_but_steady = Levels {
+            peak: 0.05,
+            rms: 0.02,
+        };
         assert!((quiet_but_steady.score() - 0.2).abs() < 1e-6);
     }
 

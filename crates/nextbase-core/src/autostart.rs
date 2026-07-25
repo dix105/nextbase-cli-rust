@@ -252,7 +252,13 @@ mod platform {
             startup_file().display()
         );
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -338,7 +344,9 @@ mod platform {
             ),
         )?;
 
-        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
         let status = Command::new("systemctl")
             .args(["--user", "enable", "nextbase-wisper.service"])
             .status();
@@ -354,7 +362,9 @@ mod platform {
             .args(["--user", "disable", "nextbase-wisper.service"])
             .status();
         let _ = std::fs::remove_file(service_file());
-        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
         Ok(AutostartResult {
             enabled: false,
             message: "Autostart disabled. systemd user service removed.".into(),

@@ -27,7 +27,7 @@ pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
         WisperCommand::Transcribe { file } => commands::transcribe(&file).await,
         WisperCommand::Media { args } => commands::media(&args),
         WisperCommand::Autostart { args } => commands::autostart(&args),
-        WisperCommand::Autoupdate { args } => commands::autoupdate(&args),
+        WisperCommand::Autoupdate { args } => commands::autoupdate(&args).await,
         WisperCommand::Doctor => commands::doctor(),
         WisperCommand::Record { seconds } => commands::record(seconds),
         WisperCommand::Mic { auto } => commands::mic(auto),

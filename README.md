@@ -10,19 +10,27 @@ nextbase wisper <command>   # namespaced
 wisper <command>            # same thing, direct
 ```
 
-## Why the rewrite
+## What the rewrite removed
 
-The TypeScript build shells out to SoX for recording, `swift` for macOS hotkeys, and
-PowerShell/VBScript on Windows. That costs a per-launch compile of the Swift helper
-(~2s for three shortcuts), makes SoX an install prerequisite, and means the installer
-runs `npm install` plus `tsc` on the user's machine. Native capture, native event
-taps, and a single prebuilt binary remove all of it.
+The TypeScript build shelled out to SoX for recording, `swift` for macOS hotkeys,
+and PowerShell/VBScript on Windows. All of it is gone — capture, event taps, and
+keystroke injection happen in process.
+
+Measured on this machine:
+
+| | TypeScript | Rust |
+|---|---|---|
+| Listener start (3 shortcuts registered) | ~2.0s (compiles `mac-hotkey.swift` 3×) | **0.077s** |
+| `wisper status` (warm) | 144ms | **11ms** |
+| Install prerequisites | Node, npm, SoX, then `npm install` + `tsc` on the user's machine | one binary |
+| Processes while listening | 1 node + 3 swift | 1 |
 
 ## Layout
 
 ```
-crates/nextbase-core   config, storage, log, shortcut parsing, provider verification
-crates/nextbase-cli    clap surface, setup wizard, the `nextbase` and `wisper` binaries
+crates/nextbase-core   config, storage, log, shortcuts, providers, audio,
+                       hotkeys, paste, autostart, process state, updater
+crates/nextbase-cli    clap surface, setup wizard, listener, dashboard, binaries
 ```
 
 ## On-disk compatibility
@@ -35,14 +43,17 @@ Unknown config fields are carried through untouched (`Config::extra`), so writin
 config from this build never drops a setting the TypeScript CLI still owns. There is
 a test for it.
 
-Two rules worth keeping:
+Rules worth keeping:
 
-- **`wisper.log` stays plain text.** The listener's start check greps it for literal
+- **`wisper.log` stays plain text.** Start-up verification greps it for literal
   markers like `Shortcut registered:`; ANSI colour would break that. Style terminal
   output at the call site (`ui.rs`), never in `log.rs`.
 - **Shortcuts are validated before they are saved.** A key the platform cannot
-  register used to reach config and then throw at every listener start — which
-  autostart turned into a silent restart loop.
+  register used to reach config and then throw at every listener start, which
+  autostart turned into a silent 10-second restart loop.
+- **One listener per machine.** The newest listener sweeps the others, matching the
+  TypeScript listener's command line too, so the two builds cannot double-register.
+- **The dashboard binds 127.0.0.1 only.** It exposes transcript history.
 
 ## Providers
 
@@ -61,58 +72,73 @@ an auth failure.
 
 - `inquire` for the setup wizard — sequential prompts that stay in scrollback, and
   degrade cleanly when stdin is not a TTY (setup runs from installers and over SSH).
-- `indicatif` spinners for network waits like key verification.
+- `indicatif` spinners for network waits like key verification and transcription.
 - `owo-colors` through `anstream`, so colour disappears when piped or `NO_COLOR` is set.
-- `ratatui` is reserved for the two genuinely live moments — inline viewport for
-  shortcut capture and mic level metering — plus a future full-screen `wisper dash`.
-  Keep it on the crossterm backend that `inquire` already uses.
+- API keys are entered masked, and a key is only saved once it verifies. The
+  TypeScript setup printed the verification failure and saved the key anyway.
+- `ratatui` is still not a dependency. It is worth adding for the two genuinely live
+  moments — an inline viewport for live shortcut capture and mic level metering —
+  plus a possible full-screen `wisper dash`. Keep it on the crossterm backend that
+  `inquire` already uses.
 
 ## Phases
 
 | Phase | Scope | State |
 |---|---|---|
-| 0 | Workspace, clap surface, config/storage/log, shortcut logic + tests, setup wizard, `status`/`shortcuts`/`history`/`add`/`logs`/`shortcut`/`provider` | **done** |
-| 1 | All four providers via `reqwest`: `transcribe`, `polish`/`spell` text rewriting | **done** |
-| 2 | Audio: `cpal` capture + `hound` WAV, level metering, `mic` / `mic --auto` | next |
-| 3 | macOS hotkeys (CGEventTap, incl. modifier-only) + paste (`arboard` + CGEvent) → full `listen` | |
-| 4 | Autostart (launchd) + single-instance process state | |
-| 5 | Web dashboard (`axum`, HTML via `include_str!`) | |
-| 6 | Windows: hotkeys, paste, device enumeration, autostart | |
-| 7 | Releases: GH Actions matrix, signing + notarization, `self_update`, installers | |
+| 0 | Workspace, clap surface, config/storage/log, shortcut logic, setup wizard | **done** |
+| 1 | All four providers, `transcribe`, `polish`/`spell` rewriting | **done** |
+| 2 | `cpal` capture + `hound` WAV, level metering, `mic`, `mic --auto`, `record` | **done** |
+| 3 | macOS CGEventTap hotkeys, paste, the listener loop | **done, verified on macOS** |
+| 4 | Autostart (launchd/logon task/systemd), detached start, single instance | **done** |
+| 5 | Embedded dashboard with search, copy, delete | **done** |
+| 6 | Windows hotkeys, paste, autostart | **written, unverified** |
+| 7 | CI and release workflows | **written, needs secrets and a first tag** |
 
-Commands from later phases exist in the CLI surface and fail with the phase that
-will bring them, rather than silently doing nothing.
+## What still needs a human
 
-## Carried over deliberately
+1. **Grant Accessibility permission to the new binary.** macOS ties it to binary
+   identity, so this build starts untrusted even though the old CLI was allowed.
+   `wisper doctor` reports it. Every existing user will hit this on migration.
+2. **Disable the TypeScript LaunchAgent before enabling autostart.** Both builds
+   would register the same shortcuts and one press would fire twice. `wisper
+   autostart on` refuses while `com.wisper.cli` exists:
+   `launchctl bootout gui/$(id -u)/com.wisper.cli`
+3. **Verify Windows.** The hotkey, paste, and autostart code cannot be compiled from
+   macOS: `rustls` pulls in `ring`, whose build script needs a Windows C toolchain.
+   The CI job on `windows-latest` is the only check it gets.
+4. **Add signing secrets.** `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`,
+   `MACOS_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`.
+   Unsigned binaries hit Gatekeeper, and re-signing with a different identity
+   invalidates the Accessibility grant from step 1.
+5. **Live provider smoke test.** Nothing here has made a real API call yet.
 
-Port behaviour, don't reinvent it. These encode real field fixes:
+## Known gaps
 
-- the shortcut normalization tables (`Cmd`/`Command`/`Win`/`Window` → `META`, and
-  `CommandOrControl` following the platform)
-- `saarika:v2` → `saarika:v2.5`, so old configs keep working
-- silent-recording and dead-microphone detection
-- the platform-quirk comments in the TypeScript source
-
-## Known migration cost
-
-macOS Accessibility permission is bound to binary identity, so **every existing user
-must re-grant it** when they move to this binary. Phase 3 needs a first-run
-`AXIsProcessTrusted` check with a real prompt, not a silent failure. Signing and
-notarization are required before shipping it the way `install.sh` ships today.
-
-During migration a TypeScript listener and a Rust listener would both fire on one
-keypress, so the Rust listener must also sweep `cli.js _listen` processes.
+- `wisper autoupdate check --apply` reports what is available but does not replace
+  the binary; that lands with the first published release.
+- Recording uses the device's native sample rate (48 kHz here) rather than SoX's
+  fixed 16 kHz. Providers resample server side, so this only costs upload size —
+  roughly 3× — and a `rubato` resampler would remove it.
+- Linux has autostart but no hotkeys or paste, same as the TypeScript build.
+- Live shortcut capture still asks you to type the combo; the inline TUI for it is
+  the main reason to add `ratatui`.
 
 ## Development
 
 ```bash
 cargo build
 cargo test
-cargo run --bin wisper -- status
+cargo clippy --all-targets   # CI runs with -D warnings
+cargo fmt --all --check
 ```
 
-Test against a sandboxed config instead of your own:
+Test against a sandboxed config instead of your own — `HOME` is honoured
+everywhere, exactly as Node's `os.homedir()` does:
 
 ```bash
 HOME=/tmp/wisper-sandbox cargo run --bin wisper -- status
 ```
+
+`wisper doctor` is the fastest way to see permission, device, shortcut, provider,
+and listener state at once. `wisper record 3` tells a permission problem apart from
+a device problem.

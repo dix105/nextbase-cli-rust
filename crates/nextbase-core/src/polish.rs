@@ -66,8 +66,10 @@ pub fn normalize_transcript_text(text: &str) -> String {
         out.push(ch);
     }
 
-    out.trim_matches(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | ':' | ';' | '!' | '?' | '-'))
-        .to_string()
+    out.trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | '.' | ':' | ';' | '!' | '?' | '-')
+    })
+    .to_string()
 }
 
 pub async fn rewrite_text(text: &str, config: &Config, mode: RewriteMode) -> Result<String> {
@@ -155,13 +157,19 @@ mod tests {
 
     #[test]
     fn whitespace_runs_collapse() {
-        assert_eq!(normalize_transcript_text("too   many    spaces"), "too many spaces");
+        assert_eq!(
+            normalize_transcript_text("too   many    spaces"),
+            "too many spaces"
+        );
         assert_eq!(normalize_transcript_text("line\n\nbreak"), "line break");
     }
 
     #[test]
     fn edge_punctuation_and_whitespace_are_trimmed() {
-        assert_eq!(normalize_transcript_text("  ...hello world!  "), "hello world");
+        assert_eq!(
+            normalize_transcript_text("  ...hello world!  "),
+            "hello world"
+        );
         assert_eq!(normalize_transcript_text("- dash lead"), "dash lead");
     }
 

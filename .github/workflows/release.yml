@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      # macOS ties Accessibility permission to binary identity, so an unsigned or
+      # re-signed binary is treated as a different app and the user has to grant
+      # permission again. Signing keeps that stable across updates.
+      #
+      # Requires these repository secrets before releases are usable:
+      #   MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, MACOS_SIGNING_IDENTITY,
+      #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && secrets.MACOS_CERTIFICATE != ''
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN=build.keychain
+          security create-keychain -p actions "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          echo "$CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN"
+          rm certificate.p12
+
+          for binary in nextbase wisper; do
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGNING_IDENTITY" \
+              "target/${{ matrix.target }}/release/$binary"
+          done
+
+          ditto -c -k --keepParent \
+            "target/${{ matrix.target }}/release/wisper" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="nextbase-wisper-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "dist/$name.zip" \
+              "./target/${{ matrix.target }}/release/nextbase.exe" \
+              "./target/${{ matrix.target }}/release/wisper.exe"
+          else
+            tar -czf "dist/$name.tar.gz" \
+              -C "target/${{ matrix.target }}/release" nextbase wisper
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true

@@ -5,18 +5,13 @@ use nextbase_core::config::{
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
-use nextbase_core::{audio, autostart, hotkey, log, media, process_state, shortcut, storage, transcribe, verify};
+use nextbase_core::{
+    audio, autostart, hotkey, log, media, process_state, shortcut, storage, transcribe, updater,
+    verify,
+};
 use std::io::IsTerminal;
 
 use crate::ui;
-
-/// Commands whose platform layer has not been ported yet fail loudly with the
-/// phase that will bring them, instead of pretending to work.
-fn not_yet(what: &str, phase: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "`{what}` is not in the Rust build yet ({phase}). Use the current CLI for it in the meantime."
-    )
-}
 
 fn require_interactive(what: &str) -> Result<()> {
     if std::io::stdin().is_terminal() {
@@ -40,17 +35,35 @@ fn prompt_error(error: InquireError) -> anyhow::Error {
 pub fn status() -> Result<()> {
     let config = config::load();
     ui::heading("Wisper setup");
-    ui::field("Provider", config.provider.map(|p| p.to_string()).as_deref().unwrap_or("not set"));
+    ui::field(
+        "Provider",
+        config
+            .provider
+            .map(|p| p.to_string())
+            .as_deref()
+            .unwrap_or("not set"),
+    );
     ui::field("Model", config.model.as_deref().unwrap_or("not set"));
     ui::field("Shortcut", config.shortcut.as_deref().unwrap_or("not set"));
-    ui::field("Microphone", config.audio_device.as_deref().unwrap_or("default"));
+    ui::field(
+        "Microphone",
+        config.audio_device.as_deref().unwrap_or("default"),
+    );
     ui::field(
         "API key",
-        if config.is_configured() { "saved" } else { "not set" },
+        if config.is_configured() {
+            "saved"
+        } else {
+            "not set"
+        },
     );
     ui::field(
         "Auto polish",
-        if config.auto_polish.unwrap_or(false) { "enabled" } else { "disabled" },
+        if config.auto_polish.unwrap_or(false) {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     ui::field("Polish shortcut", config.polish_shortcut_or_default());
     ui::field("Spell-fix shortcut", config.spell_shortcut_or_default());
@@ -60,17 +73,27 @@ pub fn status() -> Result<()> {
             Some(false) => "disabled".to_string(),
             _ => format!(
                 "enabled at {}%",
-                config.audio_ducking_volume.unwrap_or(DEFAULT_DUCKING_VOLUME)
+                config
+                    .audio_ducking_volume
+                    .unwrap_or(DEFAULT_DUCKING_VOLUME)
             ),
         },
     );
     ui::field(
         "Autostart",
-        if config.autostart.unwrap_or(false) { "enabled" } else { "not enabled" },
+        if config.autostart.unwrap_or(false) {
+            "enabled"
+        } else {
+            "not enabled"
+        },
     );
     ui::field(
         "Auto update",
-        if config.auto_update == Some(false) { "disabled" } else { "enabled" },
+        if config.auto_update == Some(false) {
+            "disabled"
+        } else {
+            "enabled"
+        },
     );
     Ok(())
 }
@@ -153,9 +176,7 @@ fn ask_shortcut(label: &str, current: &str) -> Result<String> {
         .with_validator(|input: &str| {
             Ok(match shortcut::validate(input) {
                 Ok(()) => inquire::validator::Validation::Valid,
-                Err(error) => {
-                    inquire::validator::Validation::Invalid(error.to_string().into())
-                }
+                Err(error) => inquire::validator::Validation::Invalid(error.to_string().into()),
             })
         })
         .prompt()
@@ -183,13 +204,21 @@ pub async fn polish(args: &[String]) -> Result<()> {
             let config = config::load();
             ui::field(
                 "Auto polish",
-                if config.auto_polish.unwrap_or(false) { "enabled" } else { "disabled" },
+                if config.auto_polish.unwrap_or(false) {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
             );
             ui::field("Polish model", config.polish_model_or_default());
             ui::field("Polish shortcut", config.polish_shortcut_or_default());
             ui::field(
                 "Groq key",
-                if config.key_for(Provider::Groq).is_some() { "saved" } else { "not set" },
+                if config.key_for(Provider::Groq).is_some() {
+                    "saved"
+                } else {
+                    "not set"
+                },
             );
             Ok(())
         }
@@ -336,7 +365,11 @@ pub async fn provider() -> Result<()> {
 pub async fn setup(update_mode: bool) -> Result<()> {
     require_interactive("wisper setup")?;
 
-    ui::heading(if update_mode { "Wisper update setup" } else { "Wisper setup" });
+    ui::heading(if update_mode {
+        "Wisper update setup"
+    } else {
+        "Wisper setup"
+    });
     if update_mode {
         ui::hint("Only missing settings are asked for. Existing ones are kept.");
     }
@@ -402,7 +435,11 @@ pub async fn setup(update_mode: bool) -> Result<()> {
     } else {
         kept.push(format!(
             "auto polish {}",
-            if config.auto_polish == Some(true) { "on" } else { "off" }
+            if config.auto_polish == Some(true) {
+                "on"
+            } else {
+                "off"
+            }
         ));
     }
 
@@ -450,7 +487,11 @@ pub async fn setup(update_mode: bool) -> Result<()> {
     } else {
         kept.push(format!(
             "autostart {}",
-            if config.autostart == Some(true) { "on" } else { "off" }
+            if config.autostart == Some(true) {
+                "on"
+            } else {
+                "off"
+            }
         ));
     }
 
@@ -506,7 +547,11 @@ pub fn media(args: &[String]) -> Result<()> {
             let config = config::load();
             ui::field(
                 "Audio ducking",
-                if config.audio_ducking == Some(false) { "disabled" } else { "enabled" },
+                if config.audio_ducking == Some(false) {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
             );
             ui::field(
                 "Duck volume",
@@ -518,7 +563,11 @@ pub fn media(args: &[String]) -> Result<()> {
             Ok(())
         }
         "on" | "enable" | "enabled" => {
-            let volume = args.get(1).and_then(|v| v.parse::<u8>().ok()).unwrap_or(35).min(100);
+            let volume = args
+                .get(1)
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(35)
+                .min(100);
             config::update(|c| {
                 c.audio_ducking = Some(true);
                 c.audio_ducking_volume = Some(volume);
@@ -547,7 +596,10 @@ pub fn media(args: &[String]) -> Result<()> {
         }
         "test" => {
             if !media::is_supported() {
-                bail!("Audio ducking is not supported on {}.", std::env::consts::OS);
+                bail!(
+                    "Audio ducking is not supported on {}.",
+                    std::env::consts::OS
+                );
             }
             let mut config = config::load();
             config.audio_ducking = Some(true);
@@ -585,7 +637,9 @@ pub fn autostart(args: &[String]) -> Result<()> {
         "on" | "enable" | "enabled" => {
             if autostart::legacy_autostart_present() {
                 warn_about_legacy_autostart();
-                bail!("Refusing to enable autostart while the TypeScript LaunchAgent is installed.");
+                bail!(
+                    "Refusing to enable autostart while the TypeScript LaunchAgent is installed."
+                );
             }
             // A listener started from a terminal belongs to that terminal; the
             // launcher owns its own copy from here.
@@ -606,8 +660,82 @@ pub fn autostart(args: &[String]) -> Result<()> {
     }
 }
 
-pub fn autoupdate(_args: &[String]) -> Result<()> {
-    Err(not_yet("wisper autoupdate", "phase 7: releases"))
+pub async fn autoupdate(args: &[String]) -> Result<()> {
+    let action = args
+        .first()
+        .map(|a| a.to_lowercase())
+        .unwrap_or_else(|| "status".into());
+
+    match action.as_str() {
+        "status" => {
+            let config = config::load();
+            ui::field("Version", updater::CURRENT_VERSION);
+            ui::field(
+                "Auto update",
+                if config.auto_update == Some(false) {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
+            );
+            ui::field(
+                "Check interval",
+                &format!(
+                    "{} minutes",
+                    config.auto_update_interval_minutes.unwrap_or(180)
+                ),
+            );
+            Ok(())
+        }
+        "on" | "enable" | "enabled" => {
+            let minutes = args
+                .get(1)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(180)
+                .max(15);
+            config::update(|c| {
+                c.auto_update = Some(true);
+                c.auto_update_interval_minutes = Some(minutes);
+            })?;
+            ui::success(&format!(
+                "Auto update enabled. Checking every {minutes} minutes."
+            ));
+            Ok(())
+        }
+        "off" | "disable" | "disabled" => {
+            config::update(|c| c.auto_update = Some(false))?;
+            ui::success("Auto update disabled.");
+            Ok(())
+        }
+        "check" => {
+            let bar = ui::spinner("Checking for updates...");
+            let status = updater::check().await;
+            bar.finish_and_clear();
+
+            match status? {
+                updater::UpdateStatus::UpToDate { version } => {
+                    ui::success(&format!("Up to date (v{version})."));
+                }
+                updater::UpdateStatus::Available { current, latest } => {
+                    ui::warn(&format!("Update available: v{current} -> {latest}"));
+                    if args.iter().any(|a| a == "--apply") {
+                        // Self-replacement lands with the first published release;
+                        // claiming to update while no artifacts exist would be worse
+                        // than saying so.
+                        ui::hint("Automatic install is not wired up yet. Download the release binary and replace this one.");
+                    } else {
+                        ui::hint("Apply it with: wisper autoupdate check --apply");
+                    }
+                }
+                updater::UpdateStatus::NoReleases => {
+                    ui::info("No releases published yet, so there is nothing to update to.");
+                    ui::hint("Releases are built by .github/workflows/release.yml on a v* tag.");
+                }
+            }
+            Ok(())
+        }
+        other => bail!("Usage: wisper autoupdate on|off|status|check [--apply] (got \"{other}\")"),
+    }
 }
 
 pub fn mic(auto: bool) -> Result<()> {
@@ -649,7 +777,11 @@ pub fn auto_select_mic(quiet: bool) -> Result<()> {
             "Microphone set to {} (signal {:.5}{}).",
             result.device,
             probe.score,
-            if probe.has_signal { "" } else { ", silent during test" }
+            if probe.has_signal {
+                ""
+            } else {
+                ", silent during test"
+            }
         )),
         None => ui::success(&format!("Microphone set to {}.", result.device)),
     }
@@ -683,7 +815,10 @@ pub fn record(seconds: Option<u64>) -> Result<()> {
     let finished = recording.stop()?;
 
     ui::field("File", &finished.path.display().to_string());
-    ui::field("Duration", &format!("{:.1}s", finished.duration.as_secs_f32()));
+    ui::field(
+        "Duration",
+        &format!("{:.1}s", finished.duration.as_secs_f32()),
+    );
     ui::field(
         "Levels",
         &format!(
@@ -705,7 +840,9 @@ pub async fn listen(foreground: bool) -> Result<()> {
         // A launcher with KeepAlive would revive its own copy and sweep this one
         // away, so foreground debugging needs the launcher paused first.
         if autostart::managed() {
-            ui::warn("Autostart is enabled. Stop it first so it does not restart a rival listener:");
+            ui::warn(
+                "Autostart is enabled. Stop it first so it does not restart a rival listener:",
+            );
             ui::hint("  wisper autostart off");
         }
         return crate::listener::run().await;
@@ -738,9 +875,15 @@ fn report_listener_start() -> Result<()> {
         .map(|line| line.to_string())
         .collect();
 
-    if tail.iter().any(|line| line.contains("Shortcut registered:")) {
+    if tail
+        .iter()
+        .any(|line| line.contains("Shortcut registered:"))
+    {
         ui::success("Verified: shortcut registered.");
-    } else if tail.iter().any(|line| line.contains("could not be registered")) {
+    } else if tail
+        .iter()
+        .any(|line| line.contains("could not be registered"))
+    {
         ui::failure("Listener started but no shortcut registered. Run: wisper doctor");
     } else {
         ui::warn("Listener start requested. If the shortcut does nothing, run: wisper doctor");
@@ -805,10 +948,17 @@ pub fn doctor() -> Result<()> {
         for device in &devices {
             ui::info(&format!(
                 "{device}{}",
-                if audio::is_likely_virtual(device) { "  (virtual)" } else { "" }
+                if audio::is_likely_virtual(device) {
+                    "  (virtual)"
+                } else {
+                    ""
+                }
             ));
         }
-        ui::field("Configured", config.audio_device.as_deref().unwrap_or("default"));
+        ui::field(
+            "Configured",
+            config.audio_device.as_deref().unwrap_or("default"),
+        );
     }
 
     println!();
@@ -823,7 +973,9 @@ pub fn doctor() -> Result<()> {
             Ok(()) => {
                 let clash = label != "Dictation" && shortcut::normalize(value) == dictation;
                 if clash {
-                    ui::warn(&format!("{label}: {value} is the same combo as the dictation shortcut"));
+                    ui::warn(&format!(
+                        "{label}: {value} is the same combo as the dictation shortcut"
+                    ));
                 } else {
                     ui::success(&format!("{label}: {value}"));
                 }

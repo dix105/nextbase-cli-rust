@@ -46,7 +46,9 @@ pub async fn verify_provider_key(provider: Provider, key: &str) -> VerifyResult 
             // Sarvam exposes no lightweight verification endpoint; `/models`
             // returns 404 even for valid keys and used to block setup. The first
             // transcription call is the real check.
-            return VerifyResult::ok("Sarvam key saved. It will be validated on first transcription.");
+            return VerifyResult::ok(
+                "Sarvam key saved. It will be validated on first transcription.",
+            );
         }
         Provider::NextbaseCodex => {
             if !key.starts_with("nbmg_") {

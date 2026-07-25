@@ -45,10 +45,7 @@ fn normalize_key_with(key: &str, control: &str) -> String {
     }
 
     if value.contains(char::is_whitespace) {
-        value = value
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join("SPACE");
+        value = value.split_whitespace().collect::<Vec<_>>().join("SPACE");
     }
 
     value
@@ -216,7 +213,10 @@ mod tests {
             normalize_with("Alt+Ctrl+Space", "CTRL"),
             normalize_with("Ctrl+Alt+Space", "CTRL")
         );
-        assert_eq!(normalize_with(" ctrl + alt + space ", "CTRL"), "ALT+CTRL+SPACE");
+        assert_eq!(
+            normalize_with(" ctrl + alt + space ", "CTRL"),
+            "ALT+CTRL+SPACE"
+        );
     }
 
     #[test]
@@ -244,18 +244,32 @@ mod tests {
         // Exactly what bricked the listener in the field: a backtick shortcut
         // reached config, then threw at every listener start.
         for bad in ["CommandOrControl+`", "Ctrl+Alt+~", "CommandOrControl+F30"] {
-            assert!(validate_with(bad, "macos").is_err(), "{bad} must be rejected");
+            assert!(
+                validate_with(bad, "macos").is_err(),
+                "{bad} must be rejected"
+            );
         }
         assert!(validate_with("CommandOrControl+F30", "windows").is_err());
     }
 
     #[test]
     fn supported_keys_are_accepted() {
-        for good in ["F13", "CommandOrControl+Shift+P", "Ctrl+Alt+Space", "Ctrl+Window"] {
-            assert!(validate_with(good, "macos").is_ok(), "{good} must be accepted");
+        for good in [
+            "F13",
+            "CommandOrControl+Shift+P",
+            "Ctrl+Alt+Space",
+            "Ctrl+Window",
+        ] {
+            assert!(
+                validate_with(good, "macos").is_ok(),
+                "{good} must be accepted"
+            );
         }
         for good in ["F24", "Ctrl+Alt+Space", "Ctrl+Window"] {
-            assert!(validate_with(good, "windows").is_ok(), "{good} must be accepted");
+            assert!(
+                validate_with(good, "windows").is_ok(),
+                "{good} must be accepted"
+            );
         }
     }
 

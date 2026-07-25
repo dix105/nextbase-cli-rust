@@ -17,4 +17,5 @@ pub mod process_state;
 pub mod shortcut;
 pub mod storage;
 pub mod transcribe;
+pub mod updater;
 pub mod verify;

@@ -192,8 +192,7 @@ pub fn load() -> Config {
 
 pub fn save(config: &Config) -> Result<()> {
     let dir = paths::wisper_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("Could not create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("Could not create {}", dir.display()))?;
 
     let body = serde_json::to_string_pretty(config)?;
     let target = paths::config_file();
@@ -229,9 +228,11 @@ mod tests {
 
     #[test]
     fn camel_case_matches_the_typescript_file() {
-        let mut config = Config::default();
-        config.polish_shortcut = Some("CommandOrControl+Shift+P".into());
-        config.auto_update_interval_minutes = Some(180);
+        let config = Config {
+            polish_shortcut: Some("CommandOrControl+Shift+P".into()),
+            auto_update_interval_minutes: Some(180),
+            ..Default::default()
+        };
         let written = serde_json::to_string(&config).unwrap();
         assert!(written.contains("polishShortcut"));
         assert!(written.contains("autoUpdateIntervalMinutes"));

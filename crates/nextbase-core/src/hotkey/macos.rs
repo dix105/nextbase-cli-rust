@@ -107,7 +107,7 @@ where
         let callback = move |_proxy: CGEventTapProxy,
                              event_type: CGEventType,
                              event: &CGEvent|
-         -> Option<CGEvent> {
+              -> Option<CGEvent> {
             match event_type {
                 // The tap is disabled by the system if it ever runs long. Pass the
                 // event through; re-enabling is handled by the timeout branch below.

@@ -80,9 +80,7 @@ pub enum WisperCommand {
     /// Show listener logs
     Logs,
     /// Transcribe an audio file
-    Transcribe {
-        file: String,
-    },
+    Transcribe { file: String },
     /// Lower system volume while recording: `media on|off|status|volume <n>|test`
     Media {
         #[arg(trailing_var_arg = true)]
@@ -127,7 +125,5 @@ pub enum WisperCommand {
     Restart,
     /// Open the local web dashboard
     #[command(alias = "app")]
-    Open {
-        port: Option<u16>,
-    },
+    Open { port: Option<u16> },
 }
