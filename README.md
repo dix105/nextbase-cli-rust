@@ -25,6 +25,82 @@ Measured on this machine:
 | Install prerequisites | Node, npm, SoX, then `npm install` + `tsc` on the user's machine | one binary |
 | Processes while listening | 1 node + 3 swift | 1 |
 
+## Install
+
+### From source
+
+Needs a Rust toolchain ([rustup](https://rustup.rs)). Nothing else — no Node, no
+npm, no SoX.
+
+```bash
+git clone https://github.com/dix105/nextbase-cli-rust.git
+cd nextbase-cli-rust
+cargo install --path crates/nextbase-cli --locked
+```
+
+That installs both `nextbase` and `wisper` into `~/.cargo/bin`.
+
+**Check which binary you are actually running.** If the TypeScript build is still
+installed, it lives in `~/.local/bin`, and on a default macOS setup that directory
+comes *before* `~/.cargo/bin` on `PATH` — so plain `wisper` keeps running the old
+build:
+
+```bash
+command -v wisper          # tells you which one wins
+~/.cargo/bin/wisper doctor # run this build explicitly
+```
+
+To make this build win, put `~/.cargo/bin` earlier on `PATH`, or remove the old
+binaries:
+
+```bash
+rm -f ~/.local/bin/wisper ~/.local/bin/nextbase ~/.local/bin/notebot
+```
+
+### From a release
+
+Not available yet — no release has been tagged. Once `v*` is pushed and
+`.github/workflows/release.yml` has run, this is the install:
+
+```bash
+# macOS (Apple silicon; use x86_64-apple-darwin on Intel)
+curl -fsSL https://github.com/dix105/nextbase-cli-rust/releases/latest/download/nextbase-wisper-aarch64-apple-darwin.tar.gz \
+  | tar -xz -C ~/.local/bin
+```
+
+```powershell
+# Windows
+$zip = "$env:TEMP\wisper.zip"
+Invoke-WebRequest -UseBasicParsing -Uri `
+  "https://github.com/dix105/nextbase-cli-rust/releases/latest/download/nextbase-wisper-x86_64-pc-windows-msvc.zip" `
+  -OutFile $zip
+Expand-Archive -Force $zip -DestinationPath "$env:LOCALAPPDATA\Programs\Wisper"
+```
+
+Until the release is signed, macOS Gatekeeper will block a downloaded binary until
+you clear it: `xattr -d com.apple.quarantine ./wisper`.
+
+### First run
+
+```bash
+wisper setup     # model, API key, shortcut, preferences
+wisper doctor    # permissions, microphone, shortcuts, provider, listener
+wisper listen    # start the background listener
+```
+
+On macOS, `wisper doctor` will report Accessibility as missing until you grant it in
+**System Settings → Privacy & Security → Accessibility**. Add the binary you
+installed (`~/.cargo/bin/wisper`), or the terminal you run it from. Global shortcuts
+cannot work without it, and the grant is tied to that exact binary — replacing it
+later means granting again.
+
+### Uninstall
+
+```bash
+wisper autostart off
+cargo uninstall nextbase-cli
+```
+
 ## Layout
 
 ```
