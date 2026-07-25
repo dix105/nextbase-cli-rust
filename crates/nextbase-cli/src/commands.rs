@@ -5,7 +5,7 @@ use nextbase_core::config::{
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
-use nextbase_core::{audio, hotkey, log, process_state, shortcut, storage, transcribe, verify};
+use nextbase_core::{audio, autostart, hotkey, log, process_state, shortcut, storage, transcribe, verify};
 use std::io::IsTerminal;
 
 use crate::ui;
@@ -499,8 +499,48 @@ pub fn media(_args: &[String]) -> Result<()> {
     Err(not_yet("wisper media", "phase 3: platform layer"))
 }
 
-pub fn autostart(_args: &[String]) -> Result<()> {
-    Err(not_yet("wisper autostart", "phase 4: autostart"))
+pub fn autostart(args: &[String]) -> Result<()> {
+    let action = args
+        .first()
+        .map(|a| a.to_lowercase())
+        .unwrap_or_else(|| "status".into());
+
+    match action.as_str() {
+        "status" => {
+            let status = autostart::status()?;
+            config::update(|c| c.autostart = Some(status.enabled))?;
+            if status.enabled {
+                ui::success(&status.message);
+            } else {
+                ui::info(&status.message);
+            }
+            if autostart::legacy_autostart_present() {
+                warn_about_legacy_autostart();
+            }
+            Ok(())
+        }
+        "on" | "enable" | "enabled" => {
+            if autostart::legacy_autostart_present() {
+                warn_about_legacy_autostart();
+                bail!("Refusing to enable autostart while the TypeScript LaunchAgent is installed.");
+            }
+            // A listener started from a terminal belongs to that terminal; the
+            // launcher owns its own copy from here.
+            process_state::stop_other_listeners();
+            let result = autostart::enable()?;
+            config::update(|c| c.autostart = Some(result.enabled))?;
+            ui::success(&result.message);
+            report_listener_start()
+        }
+        "off" | "disable" | "disabled" => {
+            let result = autostart::disable()?;
+            config::update(|c| c.autostart = Some(false))?;
+            process_state::stop_other_listeners();
+            ui::success(&result.message);
+            Ok(())
+        }
+        other => bail!("Usage: wisper autostart on|off|status (got \"{other}\")"),
+    }
 }
 
 pub fn autoupdate(_args: &[String]) -> Result<()> {
@@ -599,16 +639,74 @@ pub fn record(seconds: Option<u64>) -> Result<()> {
 
 pub async fn listen(foreground: bool) -> Result<()> {
     if foreground {
+        // A launcher with KeepAlive would revive its own copy and sweep this one
+        // away, so foreground debugging needs the launcher paused first.
+        if autostart::managed() {
+            ui::warn("Autostart is enabled. Stop it first so it does not restart a rival listener:");
+            ui::hint("  wisper autostart off");
+        }
         return crate::listener::run().await;
     }
-    // Detaching is part of phase 4; running in the foreground is the honest
-    // behaviour until then.
-    ui::warn("Detached start is not wired yet. Running in the foreground.");
-    ui::hint("Press Ctrl+C to stop.");
-    crate::listener::run().await
+
+    warn_about_legacy_autostart();
+    process_state::stop_other_listeners();
+
+    if autostart::managed() {
+        if autostart::restart() {
+            ui::success("Listener restarted through the login launcher.");
+            return report_listener_start();
+        }
+        ui::warn("Could not restart through the launcher. Starting directly.");
+    }
+
+    let pid = autostart::spawn_detached()?;
+    ui::success(&format!("Listener started in the background (pid {pid})."));
+    report_listener_start()
+}
+
+/// Confirm the listener actually came up. A detached process that dies instantly
+/// used to look identical to one that started fine.
+fn report_listener_start() -> Result<()> {
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let tail: Vec<String> = log::read_logs()
+        .lines()
+        .rev()
+        .take(25)
+        .map(|line| line.to_string())
+        .collect();
+
+    if tail.iter().any(|line| line.contains("Shortcut registered:")) {
+        ui::success("Verified: shortcut registered.");
+    } else if tail.iter().any(|line| line.contains("could not be registered")) {
+        ui::failure("Listener started but no shortcut registered. Run: wisper doctor");
+    } else {
+        ui::warn("Listener start requested. If the shortcut does nothing, run: wisper doctor");
+    }
+    Ok(())
+}
+
+/// The TypeScript LaunchAgent and this build would both register the same
+/// shortcuts, so one press would fire twice.
+fn warn_about_legacy_autostart() {
+    if autostart::legacy_autostart_present() {
+        ui::warn("The TypeScript LaunchAgent (com.wisper.cli) is still installed.");
+        ui::hint("Both builds would register the same shortcuts. Disable the old one first:");
+        ui::hint("  launchctl bootout gui/$(id -u)/com.wisper.cli");
+    }
 }
 
 pub fn stop() -> Result<()> {
+    // With a KeepAlive launcher, killing the process alone is pointless: it comes
+    // straight back. The launcher has to be stopped too.
+    if autostart::managed() {
+        autostart::disable()?;
+        config::update(|c| c.autostart = Some(false))?;
+        process_state::stop_other_listeners();
+        ui::success("Listener stopped and autostart disabled.");
+        ui::hint("Re-enable it with: wisper autostart on");
+        return Ok(());
+    }
+
     let stopped = process_state::stop_other_listeners();
     if stopped > 0 {
         ui::success(&format!("Stopped {stopped} listener(s)."));
@@ -619,11 +717,7 @@ pub fn stop() -> Result<()> {
 }
 
 pub async fn restart() -> Result<()> {
-    let stopped = process_state::stop_other_listeners();
-    if stopped > 0 {
-        ui::info(&format!("Stopped {stopped} listener(s)."));
-    }
-    listen(true).await
+    listen(false).await
 }
 
 /// One place to see why dictation is not working. Permission problems are this

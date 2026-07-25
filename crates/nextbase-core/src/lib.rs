@@ -5,6 +5,7 @@
 //! not change the on-disk formats without a migration.
 
 pub mod audio;
+pub mod autostart;
 pub mod config;
 pub mod hotkey;
 pub mod log;

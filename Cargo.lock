@@ -1356,6 +1356,7 @@ dependencies = [
  "core-graphics",
  "cpal",
  "hound",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
