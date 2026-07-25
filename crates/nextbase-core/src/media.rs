@@ -72,7 +72,9 @@ fn read_volume() -> Option<u8> {
 #[cfg(windows)]
 fn set_volume(percent: u8) -> Result<()> {
     unsafe {
-        endpoint_volume()?.SetMasterVolumeLevelScalar(f32::from(percent.min(100)) / 100.0, None)?;
+        // The event-context GUID is optional; a null pointer means "no context".
+        endpoint_volume()?
+            .SetMasterVolumeLevelScalar(f32::from(percent.min(100)) / 100.0, std::ptr::null())?;
     }
     Ok(())
 }
