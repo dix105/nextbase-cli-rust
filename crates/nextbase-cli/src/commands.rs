@@ -5,7 +5,7 @@ use nextbase_core::config::{
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
-use nextbase_core::{log, shortcut, storage, transcribe, verify};
+use nextbase_core::{audio, log, shortcut, storage, transcribe, verify};
 use std::io::IsTerminal;
 
 use crate::ui;
@@ -507,8 +507,94 @@ pub fn autoupdate(_args: &[String]) -> Result<()> {
     Err(not_yet("wisper autoupdate", "phase 7: releases"))
 }
 
-pub fn mic(_auto: bool) -> Result<()> {
-    Err(not_yet("wisper mic", "phase 2: audio"))
+pub fn mic(auto: bool) -> Result<()> {
+    if auto {
+        return auto_select_mic(false);
+    }
+
+    require_interactive("Choosing a microphone")?;
+    let mut devices = vec![audio::DEFAULT_DEVICE.to_string()];
+    devices.extend(audio::list_input_devices());
+    if devices.len() == 1 {
+        bail!("No microphone devices found.");
+    }
+
+    let chosen = Select::new("Select microphone:", devices)
+        .prompt()
+        .map_err(prompt_error)?;
+    config::update(|c| c.audio_device = Some(chosen.clone()))?;
+    ui::success(&format!("Microphone set to {chosen}."));
+    ui::hint("Restart the listener to pick it up: wisper restart");
+    Ok(())
+}
+
+/// Probe every input and keep the one that actually hears something.
+pub fn auto_select_mic(quiet: bool) -> Result<()> {
+    let configured = config::load().audio_device;
+    let bar = ui::spinner("Testing microphones...");
+    let result = audio::auto_detect_input_device(configured.as_deref());
+    bar.finish_and_clear();
+
+    config::update(|c| c.audio_device = Some(result.device.clone()))?;
+
+    let chosen = result
+        .probes
+        .iter()
+        .find(|probe| probe.device == result.device);
+    match chosen {
+        Some(probe) => ui::success(&format!(
+            "Microphone set to {} (signal {:.5}{}).",
+            result.device,
+            probe.score,
+            if probe.has_signal { "" } else { ", silent during test" }
+        )),
+        None => ui::success(&format!("Microphone set to {}.", result.device)),
+    }
+
+    if !quiet {
+        for probe in result.probes.iter().filter(|p| !p.ok) {
+            ui::warn(&format!(
+                "Skipped {}: {}",
+                probe.device,
+                probe.error.as_deref().unwrap_or("could not be opened")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Capture without the hotkey. The quickest way to tell a permission problem from
+/// a device problem.
+pub fn record(seconds: Option<u64>) -> Result<()> {
+    let seconds = seconds.unwrap_or(3).clamp(1, 120);
+    let config = config::load();
+    let device = config.audio_device.as_deref();
+    let path = audio::new_recording_path()?;
+
+    ui::info(&format!(
+        "Recording {seconds}s from {}...",
+        device.unwrap_or(audio::DEFAULT_DEVICE)
+    ));
+    let recording = audio::start(device, path)?;
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    let finished = recording.stop()?;
+
+    ui::field("File", &finished.path.display().to_string());
+    ui::field("Duration", &format!("{:.1}s", finished.duration.as_secs_f32()));
+    ui::field(
+        "Levels",
+        &format!(
+            "peak {:.5}, RMS {:.5}",
+            finished.levels.peak, finished.levels.rms
+        ),
+    );
+
+    if finished.levels.is_silent() {
+        ui::warn("Recording is silent. Check the input in System Settings > Sound, and that your terminal has microphone permission.");
+    } else {
+        ui::success("Microphone is working.");
+    }
+    Ok(())
 }
 
 pub fn listen(_foreground: bool) -> Result<()> {

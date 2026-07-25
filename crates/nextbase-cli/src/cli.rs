@@ -99,6 +99,11 @@ pub enum WisperCommand {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Record a test clip without the hotkey, for debugging capture
+    Record {
+        /// Seconds to record
+        seconds: Option<u64>,
+    },
     /// Pick the microphone
     Mic {
         /// Test microphones and pick the working one

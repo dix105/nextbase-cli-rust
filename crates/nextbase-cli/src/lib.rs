@@ -26,6 +26,7 @@ pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
         WisperCommand::Media { args } => commands::media(&args),
         WisperCommand::Autostart { args } => commands::autostart(&args),
         WisperCommand::Autoupdate { args } => commands::autoupdate(&args),
+        WisperCommand::Record { seconds } => commands::record(seconds),
         WisperCommand::Mic { auto } => commands::mic(auto),
         WisperCommand::Listen { foreground } => commands::listen(foreground),
         WisperCommand::ListenInternal => commands::listen(true),
