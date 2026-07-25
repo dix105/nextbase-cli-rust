@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod commands;
+pub mod listener;
 pub mod ui;
 
 use anyhow::Result;
@@ -26,12 +27,13 @@ pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
         WisperCommand::Media { args } => commands::media(&args),
         WisperCommand::Autostart { args } => commands::autostart(&args),
         WisperCommand::Autoupdate { args } => commands::autoupdate(&args),
+        WisperCommand::Doctor => commands::doctor(),
         WisperCommand::Record { seconds } => commands::record(seconds),
         WisperCommand::Mic { auto } => commands::mic(auto),
-        WisperCommand::Listen { foreground } => commands::listen(foreground),
-        WisperCommand::ListenInternal => commands::listen(true),
+        WisperCommand::Listen { foreground } => commands::listen(foreground).await,
+        WisperCommand::ListenInternal => crate::listener::run().await,
         WisperCommand::Stop => commands::stop(),
-        WisperCommand::Restart => commands::restart(),
+        WisperCommand::Restart => commands::restart().await,
         WisperCommand::Open { port } => commands::open(port),
     }
 }

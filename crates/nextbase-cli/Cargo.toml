@@ -21,4 +21,4 @@ inquire = "0.7"
 indicatif = "0.17"
 owo-colors = "4"
 anstream = "0.6"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

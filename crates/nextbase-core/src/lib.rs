@@ -6,9 +6,12 @@
 
 pub mod audio;
 pub mod config;
+pub mod hotkey;
 pub mod log;
+pub mod paste;
 pub mod paths;
 pub mod polish;
+pub mod process_state;
 pub mod shortcut;
 pub mod storage;
 pub mod transcribe;

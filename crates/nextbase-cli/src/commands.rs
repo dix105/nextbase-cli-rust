@@ -5,7 +5,7 @@ use nextbase_core::config::{
     DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
-use nextbase_core::{audio, log, shortcut, storage, transcribe, verify};
+use nextbase_core::{audio, hotkey, log, process_state, shortcut, storage, transcribe, verify};
 use std::io::IsTerminal;
 
 use crate::ui;
@@ -597,16 +597,107 @@ pub fn record(seconds: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-pub fn listen(_foreground: bool) -> Result<()> {
-    Err(not_yet("wisper listen", "phase 3: hotkeys and capture"))
+pub async fn listen(foreground: bool) -> Result<()> {
+    if foreground {
+        return crate::listener::run().await;
+    }
+    // Detaching is part of phase 4; running in the foreground is the honest
+    // behaviour until then.
+    ui::warn("Detached start is not wired yet. Running in the foreground.");
+    ui::hint("Press Ctrl+C to stop.");
+    crate::listener::run().await
 }
 
 pub fn stop() -> Result<()> {
-    Err(not_yet("wisper stop", "phase 4: process state"))
+    let stopped = process_state::stop_other_listeners();
+    if stopped > 0 {
+        ui::success(&format!("Stopped {stopped} listener(s)."));
+    } else {
+        ui::info("No running listener found.");
+    }
+    Ok(())
 }
 
-pub fn restart() -> Result<()> {
-    Err(not_yet("wisper restart", "phase 4: process state"))
+pub async fn restart() -> Result<()> {
+    let stopped = process_state::stop_other_listeners();
+    if stopped > 0 {
+        ui::info(&format!("Stopped {stopped} listener(s)."));
+    }
+    listen(true).await
+}
+
+/// One place to see why dictation is not working. Permission problems are this
+/// tool's most common failure, and they are invisible from a detached listener.
+pub fn doctor() -> Result<()> {
+    let config = config::load();
+
+    ui::heading("Permissions");
+    if hotkey::has_permission() {
+        ui::success("Accessibility: granted (global shortcuts can be registered)");
+    } else {
+        ui::failure("Accessibility: missing");
+        ui::hint(hotkey::permission_hint());
+    }
+
+    println!();
+    ui::heading("Microphone");
+    let devices = audio::list_input_devices();
+    if devices.is_empty() {
+        ui::failure("No input devices found");
+    } else {
+        for device in &devices {
+            ui::info(&format!(
+                "{device}{}",
+                if audio::is_likely_virtual(device) { "  (virtual)" } else { "" }
+            ));
+        }
+        ui::field("Configured", config.audio_device.as_deref().unwrap_or("default"));
+    }
+
+    println!();
+    ui::heading("Shortcuts");
+    let dictation = shortcut::normalize(config.shortcut_or_default());
+    for (label, value) in [
+        ("Dictation", config.shortcut_or_default()),
+        ("Polish", config.polish_shortcut_or_default()),
+        ("Spell-fix", config.spell_shortcut_or_default()),
+    ] {
+        match shortcut::validate(value) {
+            Ok(()) => {
+                let clash = label != "Dictation" && shortcut::normalize(value) == dictation;
+                if clash {
+                    ui::warn(&format!("{label}: {value} is the same combo as the dictation shortcut"));
+                } else {
+                    ui::success(&format!("{label}: {value}"));
+                }
+            }
+            Err(error) => ui::failure(&format!("{label}: {value} — {error}")),
+        }
+    }
+
+    println!();
+    ui::heading("Provider");
+    if config.is_configured() {
+        ui::success(&format!(
+            "{} / {}",
+            config.provider.map(|p| p.to_string()).unwrap_or_default(),
+            config.model.as_deref().unwrap_or("default model")
+        ));
+    } else {
+        ui::failure("No provider or API key. Run: wisper setup");
+    }
+
+    println!();
+    ui::heading("Listener");
+    let others = process_state::other_listener_pids();
+    match others.len() {
+        0 => ui::info("Not running."),
+        1 => ui::success(&format!("Running (pid {}).", others[0])),
+        n => ui::failure(&format!(
+            "{n} listeners running ({others:?}). Every shortcut press fires {n} times. Run: wisper stop"
+        )),
+    }
+    Ok(())
 }
 
 pub fn open(_port: Option<u16>) -> Result<()> {
