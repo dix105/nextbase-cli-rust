@@ -13,6 +13,9 @@ pub const DEFAULT_SPELL_SHORTCUT: &str = "CommandOrControl+Alt+S";
 pub const DEFAULT_POLISH_MODEL: &str = "llama-3.3-70b-versatile";
 pub const DEFAULT_DUCKING_VOLUME: u8 = 35;
 pub const DEFAULT_UPDATE_INTERVAL_MINUTES: u64 = 180;
+/// Floor for the update-check interval: GitHub rate-limits unauthenticated API
+/// calls, and a listener polling every minute would burn that allowance for nothing.
+pub const MIN_UPDATE_INTERVAL_MINUTES: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Provider {

@@ -81,6 +81,25 @@ exact binary — so it has to be re-granted after an update replaces it. Until
 releases are signed, macOS also quarantines a downloaded binary; the installer
 clears that for you.
 
+### Updating
+
+```bash
+wisper update           # install the latest release over this one
+wisper update --check   # only report whether one exists
+```
+
+No `curl` re-run needed. It downloads the release binaries, refuses to install
+anything that does not run, stops the listener for the swap (Windows will not
+replace a running executable at all), and restarts it afterwards — through the
+login launcher if one owns it, so launchd cannot respawn the listener from a
+half-written binary.
+
+The listener also checks periodically and writes a line to `wisper logs` when a
+release is out; `wisper autoupdate on|off|status` controls that. It never installs
+by itself on purpose: while releases are unsigned, replacing the binary voids the
+macOS Accessibility grant, and doing that unattended would leave the shortcut
+silently dead.
+
 ### Uninstall
 
 ```bash
@@ -190,8 +209,10 @@ an auth failure.
 
 ## Known gaps
 
-- `wisper autoupdate check --apply` reports what is available but does not replace
-  the binary; that lands with the first published release.
+- `wisper update` cannot upgrade *to* a release built before v0.1.5, because the
+  bare per-platform binaries it downloads were not published until then. Older
+  installs need one more `curl`/`iwr` run to reach v0.1.5, after which `wisper
+  update` works.
 - Recording uses the device's native sample rate (48 kHz here) rather than SoX's
   fixed 16 kHz. Providers resample server side, so this only costs upload size —
   roughly 3× — and a `rubato` resampler would remove it.

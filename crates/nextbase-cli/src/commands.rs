@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use inquire::{Confirm, InquireError, Password, PasswordDisplayMode, Select, Text};
 use nextbase_core::config::{
     self, Provider, DEFAULT_DUCKING_VOLUME, DEFAULT_POLISH_MODEL, DEFAULT_POLISH_SHORTCUT,
-    DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
+    DEFAULT_SHORTCUT, DEFAULT_SPELL_SHORTCUT, DEFAULT_UPDATE_INTERVAL_MINUTES,
+    MIN_UPDATE_INTERVAL_MINUTES, MODEL_OPTIONS,
 };
 use nextbase_core::polish::{self, RewriteMode};
 use nextbase_core::{
@@ -739,20 +740,25 @@ pub async fn autoupdate(args: &[String]) -> Result<()> {
         "status" => {
             let config = config::load();
             ui::field("Version", updater::CURRENT_VERSION);
+            let enabled = config.auto_update != Some(false);
             ui::field(
-                "Auto update",
-                if config.auto_update == Some(false) {
-                    "disabled"
-                } else {
-                    "enabled"
-                },
+                "Update checks",
+                if enabled { "enabled" } else { "disabled" },
             );
-            ui::field(
-                "Check interval",
-                &format!(
-                    "{} minutes",
-                    config.auto_update_interval_minutes.unwrap_or(180)
-                ),
+            if enabled {
+                ui::field(
+                    "Check interval",
+                    &format!(
+                        "{} minutes",
+                        config
+                            .auto_update_interval_minutes
+                            .unwrap_or(DEFAULT_UPDATE_INTERVAL_MINUTES)
+                    ),
+                );
+            }
+            // Nothing installs by itself, so say so rather than let "enabled" imply it.
+            ui::hint(
+                "The listener only logs when an update exists. Install it with: wisper update",
             );
             Ok(())
         }
@@ -760,51 +766,133 @@ pub async fn autoupdate(args: &[String]) -> Result<()> {
             let minutes = args
                 .get(1)
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(180)
-                .max(15);
+                .unwrap_or(DEFAULT_UPDATE_INTERVAL_MINUTES)
+                .max(MIN_UPDATE_INTERVAL_MINUTES);
             config::update(|c| {
                 c.auto_update = Some(true);
                 c.auto_update_interval_minutes = Some(minutes);
             })?;
             ui::success(&format!(
-                "Auto update enabled. Checking every {minutes} minutes."
+                "Update checks enabled. Checking every {minutes} minutes."
             ));
+            // The listener reads the interval once, at startup.
+            ui::hint("Restart the listener to pick it up: wisper restart");
             Ok(())
         }
         "off" | "disable" | "disabled" => {
             config::update(|c| c.auto_update = Some(false))?;
-            ui::success("Auto update disabled.");
+            ui::success("Update checks disabled.");
+            ui::hint("Restart the listener to pick it up: wisper restart");
             Ok(())
         }
-        "check" => {
-            let bar = ui::spinner("Checking for updates...");
-            let status = updater::check().await;
-            bar.finish_and_clear();
-
-            match status? {
-                updater::UpdateStatus::UpToDate { version } => {
-                    ui::success(&format!("Up to date (v{version})."));
-                }
-                updater::UpdateStatus::Available { current, latest } => {
-                    ui::warn(&format!("Update available: v{current} -> {latest}"));
-                    if args.iter().any(|a| a == "--apply") {
-                        // Self-replacement lands with the first published release;
-                        // claiming to update while no artifacts exist would be worse
-                        // than saying so.
-                        ui::hint("Automatic install is not wired up yet. Download the release binary and replace this one.");
-                    } else {
-                        ui::hint("Apply it with: wisper autoupdate check --apply");
-                    }
-                }
-                updater::UpdateStatus::NoReleases => {
-                    ui::info("No releases published yet, so there is nothing to update to.");
-                    ui::hint("Releases are built by .github/workflows/release.yml on a v* tag.");
-                }
-            }
-            Ok(())
-        }
-        other => bail!("Usage: wisper autoupdate on|off|status|check [--apply] (got \"{other}\")"),
+        // `--apply` is kept working because the old help text advertised it.
+        "check" => update(!args.iter().any(|a| a == "--apply")).await,
+        other => bail!("Usage: wisper autoupdate on|off|status|check (got \"{other}\")"),
     }
+}
+
+/// Install the latest release over this one.
+pub async fn update(check_only: bool) -> Result<()> {
+    // Windows leaves the previous binary behind because it cannot delete a running
+    // image; this is the later run that can.
+    updater::clean_stale();
+
+    let bar = ui::spinner("Checking for updates...");
+    let release = updater::latest_release().await;
+    bar.finish_and_clear();
+
+    let Some(release) = release? else {
+        ui::info("No releases published yet, so there is nothing to update to.");
+        return Ok(());
+    };
+
+    if !release.is_newer_than_current() {
+        ui::success(&format!(
+            "Already on the latest release (v{}).",
+            updater::CURRENT_VERSION
+        ));
+        return Ok(());
+    }
+
+    ui::warn(&format!(
+        "Update available: v{} -> {}",
+        updater::CURRENT_VERSION,
+        release.tag
+    ));
+    if check_only {
+        ui::hint("Install it with: wisper update");
+        return Ok(());
+    }
+
+    // The listener runs from the binary being replaced. Windows will not let
+    // anything overwrite a running image, and on every platform a listener left
+    // alive would carry on executing the old code.
+    let was_running = process_state::listener_is_running();
+    let supervised = autostart::suspend();
+    process_state::stop_other_listeners();
+
+    let survivors = process_state::stubborn_listeners();
+    if !survivors.is_empty() {
+        if supervised {
+            autostart::resume();
+        }
+        ui::failure(&format!(
+            "{} listener(s) could not be stopped: {survivors:?}",
+            survivors.len()
+        ));
+        bail!("Not updating while a listener is running. Stop those PIDs and try again.");
+    }
+
+    let bar = ui::spinner(&format!("Downloading {}...", release.tag));
+    let applied = updater::apply(&release).await;
+    bar.finish_and_clear();
+
+    let applied = match applied {
+        Ok(applied) => applied,
+        Err(error) => {
+            // The old binaries are untouched on failure, so put the listener back.
+            if supervised {
+                autostart::resume();
+            } else if was_running {
+                let _ = autostart::spawn_detached();
+            }
+            return Err(error);
+        }
+    };
+
+    ui::success(&format!("Updated v{} -> {}", applied.from, applied.to));
+    for path in &applied.replaced {
+        ui::field("Replaced", &path.display().to_string());
+    }
+
+    if supervised {
+        if autostart::resume() {
+            ui::success("Listener restarted through the login launcher.");
+            report_listener_start()?;
+        } else {
+            ui::warn("Could not restart through the launcher. Run: wisper listen");
+        }
+    } else if was_running {
+        match autostart::spawn_detached() {
+            Ok(pid) => {
+                ui::success(&format!("Listener restarted (pid {pid})."));
+                report_listener_start()?;
+            }
+            Err(error) => {
+                ui::warn(&format!("Could not restart the listener: {error}"));
+                ui::hint("Start it with: wisper listen");
+            }
+        }
+    }
+
+    if cfg!(target_os = "macos") {
+        // macOS ties Accessibility permission to binary identity, and these builds
+        // are not signed yet, so the replacement counts as a different program.
+        ui::warn("macOS may no longer trust the new binary for global shortcuts.");
+        ui::hint("If the shortcut stops working: System Settings > Privacy & Security >");
+        ui::hint("Accessibility, remove wisper with the minus button, then add it again.");
+    }
+    Ok(())
 }
 
 pub fn mic(auto: bool) -> Result<()> {

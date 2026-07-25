@@ -72,6 +72,20 @@ pub fn spawn_detached() -> Result<u32> {
         });
     }
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Windows has no SIGHUP; it kills by console instead. A child spawned
+        // without these flags inherits the terminal's console, so closing the
+        // window sends it CTRL_CLOSE_EVENT and then terminates it — the listener
+        // died with the terminal that started it. DETACHED_PROCESS gives it no
+        // console at all (safe: stdio is null and nothing here prints to a
+        // console), and the separate process group keeps Ctrl+C out too.
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
     let child = command.spawn().context("Could not start the listener")?;
     Ok(child.id())
 }
@@ -126,31 +140,19 @@ mod platform {
             .stderr(Stdio::null())
             .status();
 
-        let uid = unsafe { libc::getuid() };
-        let status = Command::new("launchctl")
-            .args(["bootstrap", &format!("gui/{uid}"), &file.to_string_lossy()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        let ok = status.map(|s| s.success()).unwrap_or(false);
-        if ok {
+        if bootstrap(&file) {
             return Ok(AutostartResult {
                 enabled: true,
                 message: "Autostart enabled with a LaunchAgent.".into(),
             });
         }
 
-        // Older macOS releases only understand load/unload.
-        let legacy = Command::new("launchctl")
-            .args(["load", &file.to_string_lossy()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
         Ok(AutostartResult {
-            enabled: legacy.map(|s| s.success()).unwrap_or(false),
-            message: format!("Autostart file written to {}.", file.display()),
+            enabled: false,
+            message: format!(
+                "Autostart file written to {} but launchctl would not load it.",
+                file.display()
+            ),
         })
     }
 
@@ -187,6 +189,54 @@ mod platform {
                 message: "Autostart disabled: no LaunchAgent found.".into(),
             }
         })
+    }
+
+    /// Stop the launcher but keep its configuration.
+    ///
+    /// `disable` deletes the plist, which is the wrong tool while the binary is
+    /// being replaced: KeepAlive would respawn the listener from a half-written
+    /// executable, and the user would silently lose their autostart setting.
+    pub fn suspend() -> bool {
+        if !launch_agent_file().exists() {
+            return false;
+        }
+        let _ = Command::new("launchctl")
+            .args(["bootout", &launchd_target()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        true
+    }
+
+    /// Load the agent again. `RunAtLoad` means this also starts the listener.
+    pub fn resume() -> bool {
+        let file = launch_agent_file();
+        if !file.exists() {
+            return false;
+        }
+        bootstrap(&file)
+    }
+
+    fn bootstrap(file: &std::path::Path) -> bool {
+        let uid = unsafe { libc::getuid() };
+        let ok = Command::new("launchctl")
+            .args(["bootstrap", &format!("gui/{uid}"), &file.to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+        // Older macOS releases only understand load/unload.
+        Command::new("launchctl")
+            .args(["load", &file.to_string_lossy()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     /// launchd owns the process, so a restart has to go through it.
@@ -311,6 +361,16 @@ mod platform {
         super::spawn_detached().is_ok()
     }
 
+    /// The logon task and Startup shim only fire at sign-in — nothing supervises
+    /// the running process, so there is no respawn to pause.
+    pub fn suspend() -> bool {
+        false
+    }
+
+    pub fn resume() -> bool {
+        false
+    }
+
     pub fn managed() -> bool {
         false
     }
@@ -393,9 +453,32 @@ mod platform {
             .unwrap_or(false)
     }
 
+    /// `Restart=always` would respawn the listener from a half-written binary, so
+    /// stop the unit — without disabling it, which would lose the user's setting.
+    pub fn suspend() -> bool {
+        if !service_file().exists() {
+            return false;
+        }
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", "nextbase-wisper.service"])
+            .status();
+        true
+    }
+
+    pub fn resume() -> bool {
+        if !service_file().exists() {
+            return false;
+        }
+        Command::new("systemctl")
+            .args(["--user", "start", "nextbase-wisper.service"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     pub fn managed() -> bool {
         service_file().exists()
     }
 }
 
-pub use platform::{disable, enable, managed, restart, status};
+pub use platform::{disable, enable, managed, restart, resume, status, suspend};

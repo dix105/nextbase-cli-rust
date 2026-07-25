@@ -8,7 +8,7 @@
 use anyhow::Result;
 use nextbase_core::hotkey::{self, HotkeyEvent};
 use nextbase_core::{
-    audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe,
+    audio, config, log, media, paste, polish, process_state, shortcut, storage, transcribe, updater,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -154,6 +154,7 @@ pub async fn run() -> Result<()> {
     }
 
     log::log("Hold the shortcut to record, release to transcribe. Ctrl+C stops the listener.");
+    spawn_update_checks(&config);
 
     let mut recording: Option<audio::Recording> = None;
     let mut terminate = Terminate::new()?;
@@ -224,6 +225,39 @@ pub async fn run() -> Result<()> {
     }
     process_state::clear_pid();
     Ok(())
+}
+
+/// Check for new releases in the background and log a notice.
+///
+/// `autoupdate on` advertised a check interval but nothing ever ran a check, so the
+/// setting did nothing at all. This notifies rather than self-applying on purpose:
+/// swapping the binary under a running listener costs the user their macOS
+/// Accessibility grant while these builds are unsigned, and doing that unattended
+/// would leave the shortcut silently dead. `wisper update` does the swap, in front
+/// of someone who can read the warning.
+fn spawn_update_checks(config: &config::Config) {
+    if config.auto_update == Some(false) {
+        return;
+    }
+    let minutes = config
+        .auto_update_interval_minutes
+        .unwrap_or(config::DEFAULT_UPDATE_INTERVAL_MINUTES)
+        .max(config::MIN_UPDATE_INTERVAL_MINUTES);
+
+    tokio::spawn(async move {
+        // A listener started at login would otherwise race the network coming up.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        loop {
+            match updater::check().await {
+                Ok(updater::UpdateStatus::Available { current, latest }) => log::log(&format!(
+                    "Update available: v{current} -> {latest}. Install it with: wisper update"
+                )),
+                Ok(_) => {}
+                Err(error) => log::log(&format!("Update check failed: {error}")),
+            }
+            tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
+        }
+    });
 }
 
 /// Discard shortcut presses that arrived while a long job was running.

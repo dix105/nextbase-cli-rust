@@ -91,7 +91,14 @@ pub enum WisperCommand {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
-    /// Control background updates: `autoupdate on|off|status|check [--apply]`
+    /// Install the latest release over this one
+    #[command(alias = "upgrade")]
+    Update {
+        /// Report whether an update exists without installing it
+        #[arg(long)]
+        check: bool,
+    },
+    /// Control background update checks: `autoupdate on|off|status|check`
     #[command(alias = "auto-update")]
     Autoupdate {
         #[arg(trailing_var_arg = true)]

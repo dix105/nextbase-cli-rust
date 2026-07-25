@@ -75,14 +75,24 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           name="nextbase-wisper-${{ matrix.target }}"
+          built="target/${{ matrix.target }}/release"
+
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "dist/$name.zip" \
-              "./target/${{ matrix.target }}/release/nextbase.exe" \
-              "./target/${{ matrix.target }}/release/wisper.exe"
+            7z a "dist/$name.zip" "./$built/nextbase.exe" "./$built/wisper.exe"
           else
-            tar -czf "dist/$name.tar.gz" \
-              -C "target/${{ matrix.target }}/release" nextbase wisper
+            tar -czf "dist/$name.tar.gz" -C "$built" nextbase wisper
           fi
+
+          # The archives above are what the installers fetch. `wisper update` takes
+          # these bare binaries instead, so it needs no archive handling on the
+          # client — one download and a rename.
+          for binary in nextbase wisper; do
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              cp "$built/$binary.exe" "dist/$binary-${{ matrix.target }}.exe"
+            else
+              cp "$built/$binary" "dist/$binary-${{ matrix.target }}"
+            fi
+          done
 
       - uses: softprops/action-gh-release@v2
         with:
