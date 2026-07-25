@@ -329,12 +329,17 @@ pub async fn apply(release: &Release) -> Result<Applied> {
     let mut pending = Vec::new();
     for binary in BINARIES {
         let path = dir.join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-        // `nextbase` may not be installed; only replace what is actually there.
-        if !path.exists() {
-            continue;
-        }
+        // Missing binaries are installed rather than skipped. They ship as one unit
+        // and share the core, and a release that adds a tool has to be able to deliver
+        // it — skipping absent names meant `nbmeet` never reached anyone who updated
+        // instead of re-running the installer.
         let name = asset_name(binary, target);
         let Some(asset) = release.asset(&name) else {
+            // A release that genuinely lacks this asset is a different case: say so
+            // rather than silently shipping a partial set.
+            if !path.exists() {
+                continue;
+            }
             bail!(
                 "Release {} has no asset named {name}. Update by re-running the installer instead.",
                 release.tag
@@ -403,6 +408,16 @@ mod tests {
         // A platform with no published binaries must fail the update with a clear
         // message rather than downloading someone else's architecture.
         assert!(build_target().is_ok());
+    }
+
+    #[test]
+    fn every_shipped_binary_is_covered_by_an_update() {
+        // A release that adds a tool has to be able to deliver it. If a fourth binary
+        // is ever added to nextbase-cli, this list is where it has to be registered.
+        assert!(BINARIES.contains(&"wisper"));
+        assert!(BINARIES.contains(&"nextbase"));
+        assert!(BINARIES.contains(&"nbmeet"));
+        assert_eq!(BINARIES.len(), 3);
     }
 
     #[test]
