@@ -1,0 +1,16 @@
+[package]
+name = "nextbase-meeting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nextbase-core = { path = "../nextbase-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono = "0.4"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time"] }

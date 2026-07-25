@@ -64,23 +64,17 @@ pub(crate) fn render_device_name() -> Result<String> {
 }
 
 fn friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Option<String> {
+    use windows::core::BSTR;
     use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::STGM_READ;
 
     unsafe {
         let store = device.OpenPropertyStore(STGM_READ).ok()?;
-        let mut value = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
-        let name = value
-            .Anonymous
-            .Anonymous
-            .Anonymous
-            .pwszVal
-            .to_string()
-            .ok()
-            .filter(|name| !name.trim().is_empty());
-        let _ = PropVariantClear(&mut value);
-        name
+        let value = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        // PROPVARIANT is an owning wrapper in windows-rs, so it frees itself and the
+        // documented conversion replaces poking at the raw union.
+        let name = BSTR::try_from(&value).ok()?.to_string();
+        Some(name).filter(|name| !name.trim().is_empty())
     }
 }
 
