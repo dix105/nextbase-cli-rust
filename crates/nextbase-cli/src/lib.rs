@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod dashboard;
 pub mod listener;
+pub mod tui;
 pub mod ui;
 
 use anyhow::Result;

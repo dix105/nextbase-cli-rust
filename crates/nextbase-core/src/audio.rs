@@ -41,6 +41,29 @@ impl Levels {
     }
 }
 
+/// Most recent chunk levels, published from the audio callback so a UI can draw a
+/// meter without waiting for the recording to finish. `f32` bits in atomics keeps
+/// the callback lock-free — it must never block.
+#[derive(Debug, Default)]
+pub struct LiveLevel {
+    peak: std::sync::atomic::AtomicU32,
+    rms: std::sync::atomic::AtomicU32,
+}
+
+impl LiveLevel {
+    fn publish(&self, levels: Levels) {
+        self.peak.store(levels.peak.to_bits(), Ordering::Relaxed);
+        self.rms.store(levels.rms.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> Levels {
+        Levels {
+            peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
+            rms: f32::from_bits(self.rms.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct LevelAccumulator {
     peak: f32,
@@ -82,6 +105,7 @@ pub struct Recording {
     path: PathBuf,
     started: Instant,
     stop: Arc<AtomicBool>,
+    live: Arc<LiveLevel>,
     worker: Option<std::thread::JoinHandle<Result<Levels>>>,
 }
 
@@ -92,6 +116,11 @@ impl Recording {
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Levels from the most recent audio callback, for a live meter.
+    pub fn live_levels(&self) -> Levels {
+        self.live.get()
     }
 
     pub fn stop(mut self) -> Result<Finished> {
@@ -179,9 +208,11 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
     };
 
     let stop = Arc::new(AtomicBool::new(false));
+    let live = Arc::new(LiveLevel::default());
     let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
 
     let thread_stop = Arc::clone(&stop);
+    let thread_live = Arc::clone(&live);
     let thread_path = path.clone();
     let worker = std::thread::spawn(move || -> Result<Levels> {
         let writer = match hound::WavWriter::create(&thread_path, spec) {
@@ -199,6 +230,7 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
         let write_frames = {
             let writer = Arc::clone(&writer);
             let levels = Arc::clone(&levels);
+            let live = Arc::clone(&thread_live);
             move |mono: &[f32]| {
                 let mut guard = match writer.lock() {
                     Ok(guard) => guard,
@@ -209,11 +241,14 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
                     Ok(accumulator) => accumulator,
                     Err(_) => return,
                 };
+                let mut chunk = LevelAccumulator::default();
                 for sample in mono {
                     accumulator.push(*sample);
+                    chunk.push(*sample);
                     let clamped = sample.clamp(-1.0, 1.0);
                     let _ = writer.write_sample((clamped * i16::MAX as f32) as i16);
                 }
+                live.publish(chunk.levels());
             }
         };
 
@@ -336,6 +371,7 @@ pub fn start(device_name: Option<&str>, path: PathBuf) -> Result<Recording> {
         path,
         started: Instant::now(),
         stop,
+        live,
         worker: Some(worker),
     })
 }

@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 
-const RELEASES_URL: &str = "https://api.github.com/repos/Nextbasedev/nextbase-rs/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/dix105/nextbase-cli-rust/releases/latest";
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

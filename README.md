@@ -76,10 +76,16 @@ an auth failure.
 - `owo-colors` through `anstream`, so colour disappears when piped or `NO_COLOR` is set.
 - API keys are entered masked, and a key is only saved once it verifies. The
   TypeScript setup printed the verification failure and saved the key anyway.
-- `ratatui` is still not a dependency. It is worth adding for the two genuinely live
-  moments — an inline viewport for live shortcut capture and mic level metering —
-  plus a possible full-screen `wisper dash`. Keep it on the crossterm backend that
-  `inquire` already uses.
+- `ratatui` drives the two genuinely live moments, both as an **inline viewport** so
+  scrollback survives: press-to-capture for shortcuts (with modifiers previewed live
+  and validation shown in place) and a mic level meter while recording. It uses the
+  crossterm that `ratatui` re-exports, so only one version of it ever touches raw
+  mode. A full-screen `wisper dash` would be the next candidate.
+
+  Two details worth keeping: the meter is scaled to roughly -60..0 dB, because speech
+  sits around 0.01-0.3 and a linear bar looks dead; and capture asks the terminal for
+  keyboard enhancements, which is what makes F13-F24 and live modifier feedback
+  possible where the terminal supports it.
 
 ## Phases
 
@@ -120,8 +126,12 @@ an auth failure.
   fixed 16 kHz. Providers resample server side, so this only costs upload size —
   roughly 3× — and a `rubato` resampler would remove it.
 - Linux has autostart but no hotkeys or paste, same as the TypeScript build.
-- Live shortcut capture still asks you to type the combo; the inline TUI for it is
-  the main reason to add `ratatui`.
+- The inline viewport needs a terminal that answers a cursor-position query. Where
+  that fails, capture says so and falls back to typing — verified by driving it
+  through a bare pty. The drawing itself is covered by `TestBackend` tests, but its
+  on-screen layout is only confirmed by running it in a real terminal.
+- Modifier-only combos like `Ctrl+Command` still have to be typed: a terminal cannot
+  observe a held modifier with no key. `wisper shortcut Ctrl+Command` works.
 
 ## Development
 

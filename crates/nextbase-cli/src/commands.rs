@@ -169,7 +169,26 @@ fn store_shortcut(kind: &str, value: &str) -> Result<()> {
 
 fn ask_shortcut(label: &str, current: &str) -> Result<String> {
     require_interactive("Setting a shortcut interactively")?;
-    ui::hint("Live key capture arrives with the listener; type the combo for now.");
+
+    // Press-to-capture is the good path. Esc inside it means "let me type it",
+    // which is also the only way to enter a modifier-only combo, and the way out
+    // when a terminal swallows F13-F24.
+    match crate::tui::capture_shortcut(label, current) {
+        Ok(Some(captured)) => {
+            ui::success(&format!("Captured {captured}."));
+            return Ok(captured);
+        }
+        Ok(None) => {}
+        Err(error) => ui::warn(&format!(
+            "Key capture unavailable ({error}). Type it instead."
+        )),
+    }
+
+    type_shortcut(label, current)
+}
+
+fn type_shortcut(label: &str, current: &str) -> Result<String> {
+    ui::hint("Modifier-only combos like Ctrl+Command can only be typed.");
     Text::new(&format!("{label} shortcut:"))
         .with_default(current)
         .with_help_message("e.g. F15, Ctrl+Alt+Space, CommandOrControl+Shift+P")
@@ -807,11 +826,18 @@ pub fn record(seconds: Option<u64>) -> Result<()> {
     let path = audio::new_recording_path()?;
 
     ui::info(&format!(
-        "Recording {seconds}s from {}...",
+        "Recording from {}...",
         device.unwrap_or(audio::DEFAULT_DEVICE)
     ));
     let recording = audio::start(device, path)?;
-    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    let limit = std::time::Duration::from_secs(seconds);
+
+    // A live meter turns "did it record anything?" into something you can see
+    // while speaking, instead of a number printed after the fact.
+    if let Err(error) = crate::tui::record_with_meter(&recording, Some(limit)) {
+        ui::warn(&format!("Meter unavailable ({error}). Recording anyway."));
+        std::thread::sleep(limit);
+    }
     let finished = recording.stop()?;
 
     ui::field("File", &finished.path.display().to_string());
