@@ -522,9 +522,30 @@ pub async fn setup(update_mode: bool) -> Result<()> {
     println!();
     status()?;
     println!();
-    ui::warn("The listener is not in the Rust build yet (phase 3-4).");
-    ui::hint("Start dictation with the current CLI: wisper listen");
-    Ok(())
+
+    // Act on the autostart answer rather than only recording it. Setup used to
+    // save the preference and stop, which left the listener to be started by hand.
+    if autostart::legacy_autostart_present() {
+        warn_about_legacy_autostart();
+        ui::hint("Remove it, then run: wisper autostart on");
+        return Ok(());
+    }
+
+    if !hotkey::has_permission() {
+        ui::warn("Accessibility permission is missing, so shortcuts will not fire yet.");
+        ui::hint(hotkey::permission_hint());
+        println!();
+    }
+
+    if config::load().autostart == Some(true) {
+        let result = autostart::enable()?;
+        ui::success(&result.message);
+        report_listener_start()
+    } else {
+        ui::info("Starting the listener now. It will not come back at login.");
+        ui::hint("Enable that later with: wisper autostart on");
+        listen(false).await
+    }
 }
 
 // ---------------------------------------------------------------- not yet
