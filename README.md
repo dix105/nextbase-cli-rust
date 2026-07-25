@@ -142,6 +142,10 @@ cargo clippy --all-targets   # CI runs with -D warnings
 cargo fmt --all --check
 ```
 
+CI uses `stable`, which can be ahead of your local toolchain and therefore knows
+lints yours does not — that is how the first CI run failed while local clippy was
+clean. Run `rustup update` before pushing.
+
 Test against a sandboxed config instead of your own — `HOME` is honoured
 everywhere, exactly as Node's `os.homedir()` does:
 

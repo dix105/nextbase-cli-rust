@@ -529,7 +529,7 @@ pub fn cleanup_old_recordings(max_files: usize, max_age: Duration) -> Result<()>
         })
         .collect();
 
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
 
     let now = std::time::SystemTime::now();
     for (index, (path, modified)) in files.iter().enumerate() {
