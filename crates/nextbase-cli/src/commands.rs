@@ -926,6 +926,15 @@ pub async fn listen(foreground: bool) -> Result<()> {
 
     warn_about_legacy_autostart();
     process_state::stop_other_listeners();
+    let survivors = process_state::stubborn_listeners();
+    if !survivors.is_empty() {
+        // Starting another one now would mean every press fires twice.
+        ui::failure(&format!(
+            "{} listener(s) could not be stopped: {survivors:?}",
+            survivors.len()
+        ));
+        bail!("Refusing to start a second listener. Stop those PIDs first.");
+    }
 
     if autostart::managed() {
         if autostart::restart() {
@@ -990,6 +999,19 @@ pub fn stop() -> Result<()> {
     }
 
     let stopped = process_state::stop_other_listeners();
+    let remaining = process_state::stubborn_listeners();
+
+    if !remaining.is_empty() {
+        // Reporting success while listeners survive is how several ended up
+        // running at once, each pasting the same dictation.
+        ui::failure(&format!(
+            "{} listener(s) are still running: {remaining:?}",
+            remaining.len()
+        ));
+        ui::hint("Stop them by PID, then run: wisper doctor");
+        return Ok(());
+    }
+
     if stopped > 0 {
         ui::success(&format!("Stopped {stopped} listener(s)."));
     } else {
