@@ -15,6 +15,11 @@ hound = "3"
 sysinfo = "0.32"
 arboard = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+# Only the timer: the batch poll loop has to sleep without blocking the runtime.
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
