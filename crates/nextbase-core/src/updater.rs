@@ -12,9 +12,9 @@ const RELEASES_URL: &str = "https://api.github.com/repos/dix105/nextbase-cli-rus
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Both binaries ship together and share the core, so a partial update would pair
-/// a new `wisper` with an old `nextbase`.
-const BINARIES: [&str; 2] = ["wisper", "nextbase"];
+/// All three binaries ship together and share the core, so a partial update would
+/// pair a new `wisper` with an old `nbmeet`.
+const BINARIES: [&str; 3] = ["wisper", "nextbase", "nbmeet"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateStatus {

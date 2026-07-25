@@ -308,6 +308,13 @@ fn clean_intermediates(meeting: &ActiveMeeting) {
 ///
 /// A crash between recording and transcription must never orphan an hour of audio.
 pub fn resumable() -> Vec<PathBuf> {
+    // A meeting that is still recording or mid-transcription has audio on disk and no
+    // note yet, which looks identical to an abandoned one. Excluding it keeps the
+    // dashboard from reporting the meeting you are currently in as orphaned.
+    let in_flight = state::load()
+        .filter(|meeting| !meeting.phase.is_finished() && meeting.phase != Phase::Recorded)
+        .map(|meeting| meeting.id);
+
     let Ok(entries) = std::fs::read_dir(paths::meetings_dir()) else {
         return Vec::new();
     };
@@ -316,6 +323,10 @@ pub fn resumable() -> Vec<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| path.join("audio.wav").is_file())
         .filter(|path| !path.join("meeting-note.md").is_file())
+        .filter(|path| {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+            name.as_deref() != in_flight.as_deref()
+        })
         .collect();
     found.sort();
     found.reverse();
@@ -354,6 +365,29 @@ mod tests {
         assert_eq!(options.num_speakers, None);
         assert!(options.with_diarization);
         assert!(options.with_timestamps);
+    }
+
+    #[test]
+    fn an_in_flight_meeting_is_not_treated_as_orphaned() {
+        // A meeting still recording has audio and no note, which looks exactly like an
+        // abandoned one — the dashboard used to report the meeting you were in as
+        // orphaned.
+        for phase in [
+            Phase::Starting,
+            Phase::Recording,
+            Phase::Stopping,
+            Phase::Sampling,
+            Phase::AwaitingApproval,
+            Phase::Transcribing,
+            Phase::Summarising,
+        ] {
+            assert!(
+                !phase.is_finished() && phase != Phase::Recorded,
+                "{phase} should be excluded from the resumable list"
+            );
+        }
+        // `Recorded` is exactly the case that *should* be resumable.
+        assert!(!Phase::Recorded.is_finished());
     }
 
     #[test]

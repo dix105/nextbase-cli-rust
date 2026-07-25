@@ -65,12 +65,44 @@
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
   .empty { color: var(--muted); padding: 28px 0; text-align: center; }
+
+  /* Meeting Agent panel */
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    padding: 14px 16px; margin-bottom: 24px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 2px; }
+  .panel .note { color: var(--muted); font-size: 12px; }
+  .panel .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .panel button.primary { border-color: var(--accent); color: var(--accent); font-size: 13px; padding: 6px 14px; }
+  .panel button.danger { border-color: var(--warn); color: var(--warn); }
+  .panel button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .elapsed { font-variant-numeric: tabular-nums; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  .levels { display: grid; gap: 6px; margin-top: 10px; }
+  .level { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
+  .meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .meter > i { display: block; height: 100%; background: var(--ok); width: 0; transition: width 120ms linear; }
+  .level.silent .meter > i { background: var(--warn); }
+  .candidates { display: grid; gap: 10px; margin-top: 12px; }
+  .candidate { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+  .candidate h3 { font-size: 13px; margin: 0 0 6px; font-family: ui-monospace, SFMono-Regular, monospace; }
+  .facts { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .excerpt {
+    font-size: 12px; white-space: pre-wrap; word-break: break-word;
+    max-height: 180px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+  }
+  .warnbox {
+    border-left: 3px solid var(--warn); padding: 6px 10px; margin-top: 10px;
+    font-size: 12px; color: var(--fg); background: color-mix(in srgb, var(--warn) 8%, transparent);
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header><h1>Wisper</h1><span class="sub" id="listener"></span></header>
   <div class="sub">Local dashboard. Nothing here leaves your machine.</div>
+
+  <div class="panel" id="meeting" hidden></div>
 
   <div class="status" id="status"></div>
 
@@ -130,12 +162,156 @@ function renderList() {
     </li>`).join('');
 }
 
-async function refresh() {
-  const response = await fetch('/api/state');
-  const state = await response.json();
+// ---------------------------------------------------------------- Meeting
+
+const clock = (seconds) => {
+  const total = Math.max(0, Math.round(seconds || 0));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+};
+
+const PHASE_TEXT = {
+  'starting': 'Opening the microphone and system audio',
+  'recording': 'Recording',
+  'stopping': 'Finalizing the recording',
+  'recorded': 'Recorded, not yet transcribed',
+  'sampling': 'Transcribing a sample in both modes',
+  'awaiting-approval': 'Waiting for you to pick a mode',
+  'transcribing': 'Transcribing the full recording',
+  'summarising': 'Writing the summary and action items',
+  'done': 'Finished',
+  'failed': 'Failed',
+};
+
+function levelRow(level) {
+  // Scaled by RMS rather than peak: a single click would otherwise peg the meter.
+  const width = Math.min(100, Math.round((level.rms || 0) * 900));
+  return `<div class="level${level.silent ? ' silent' : ''}">
+    <span>${escapeHtml(level.source)}</span>
+    <span class="meter"><i style="width:${width}%"></i></span>
+    <span>${level.silent ? 'silent' : `peak ${(level.peak || 0).toFixed(3)}`}</span>
+  </div>`;
+}
+
+function candidateCard(candidate) {
+  if (candidate.error) {
+    return `<div class="candidate"><h3>${escapeHtml(candidate.mode)}</h3>
+      <div class="facts">Failed: ${escapeHtml(candidate.error)}</div></div>`;
+  }
+  const coverage = candidate.coveredSeconds == null
+    ? 'no timestamps returned'
+    : `${clock(candidate.coveredSeconds)} of ${clock(candidate.sampleSeconds)}`;
+  return `<div class="candidate">
+    <h3>${escapeHtml(candidate.mode)}</h3>
+    <div class="facts">
+      took ${clock(candidate.elapsedSeconds)} &middot; coverage ${escapeHtml(coverage)} &middot;
+      ${candidate.segmentCount} segments, ${candidate.speakerLabels} generic label(s),
+      ${candidate.overlappingSegments} overlapping &middot;
+      language detected: ${escapeHtml(candidate.detectedLanguage || 'not reported')}
+    </div>
+    <div class="excerpt">${escapeHtml(candidate.text || '(empty)')}</div>
+    <div class="actions">
+      <button class="primary" data-approve="${escapeHtml(candidate.mode)}">Use ${escapeHtml(candidate.mode)}</button>
+    </div>
+  </div>`;
+}
+
+function renderMeeting(meeting) {
+  const panel = document.getElementById('meeting');
+
+  if (!meeting.active) {
+    panel.hidden = false;
+    panel.innerHTML = `<h2>Meeting Agent</h2>
+      <div class="note">No meeting in progress.</div>
+      ${meeting.unfinished ? `<div class="warnbox">${meeting.unfinished} recorded meeting(s)
+        were never transcribed. Finish with <code>nbmeet process</code>.</div>` : ''}
+      <div class="actions"><button class="primary" data-meeting="start">Start recording</button></div>`;
+    return;
+  }
+
+  panel.hidden = false;
+  const phase = PHASE_TEXT[meeting.phase] || meeting.phase;
+  const levels = (meeting.sourceLevels || []).map(levelRow).join('');
+  const silent = (meeting.sourceLevels || []).filter((l) => l.silent);
+
+  let body = `<h2>Meeting Agent</h2>
+    <div class="note">${escapeHtml(meeting.id)} &middot; ${escapeHtml(phase)}</div>`;
+
+  if (meeting.capturing) {
+    body += `<div class="elapsed">${clock(meeting.elapsedSeconds)}</div>
+      <div class="note">${meeting.onDiskSeconds != null
+        ? `${clock(meeting.onDiskSeconds)} safely written to disk`
+        : 'starting'}</div>
+      <div class="actions">
+        <button class="primary" data-meeting="stop"${meeting.phase === 'stopping' ? ' disabled' : ''}>
+          ${meeting.phase === 'stopping' ? 'Stopping…' : 'Stop and transcribe'}</button>
+      </div>`;
+  } else if (meeting.recordedSeconds != null) {
+    body += `<div class="elapsed">${clock(meeting.recordedSeconds)}</div>`;
+  }
+
+  if (levels) body += `<div class="levels">${levels}</div>`;
+  for (const level of silent) {
+    body += `<div class="warnbox"><strong>${escapeHtml(level.source)}</strong> was silent for the
+      whole recording, so anything from that side is missing from the transcript.</div>`;
+  }
+
+  if (meeting.processing) {
+    body += `<div class="note" style="margin-top:10px">This can take several minutes — Sarvam
+      Batch jobs queue. Safe to close this tab; it keeps running.</div>`;
+  }
+
+  if (meeting.phase === 'awaiting-approval' && meeting.sample) {
+    const sample = meeting.sample;
+    body += `<div class="note" style="margin-top:12px">
+      Sample: ${clock(sample.windowSeconds)} from ${clock(sample.windowStartSeconds)},
+      RMS ${(sample.windowRms || 0).toFixed(4)}</div>`;
+    if ((sample.windowRms || 0) < 0.005) {
+      body += `<div class="warnbox">That window is nearly silent, so neither transcript
+        means much.</div>`;
+    }
+    body += `<div class="candidates">${(sample.candidates || []).map(candidateCard).join('')}</div>
+      <div class="warnbox">Speaker labels are generic, not people. Language detection says which
+        language was heard, not whether the words are right. Check names and numbers against the
+        audio.</div>
+      <div class="actions"><button class="danger" data-meeting="reject">Reject — do not
+        transcribe</button></div>`;
+  }
+
+  if (meeting.phase === 'recorded') {
+    body += `<div class="actions"><button class="primary" data-meeting="process">Transcribe
+      it</button></div>`;
+  }
+  if (meeting.error) {
+    body += `<div class="warnbox">${escapeHtml(meeting.error)}</div>`;
+  }
+
+  panel.innerHTML = body;
+}
+
+async function post(path) {
+  const response = await fetch(path, { method: 'POST' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    alert(body.error || `Request failed: HTTP ${response.status}`);
+  }
+  await refresh();
+}
+
+async function refreshState() {
+  const state = await (await fetch('/api/state')).json();
   history = state.history;
   renderStatus(state);
   renderList();
+}
+
+async function refreshMeeting() {
+  renderMeeting(await (await fetch('/api/meeting')).json());
+}
+
+async function refresh() {
+  await Promise.all([refreshState(), refreshMeeting()]);
 }
 
 document.getElementById('q').addEventListener('input', renderList);
@@ -154,11 +330,30 @@ document.addEventListener('click', async (event) => {
   if (del) {
     await fetch(`/api/history/${encodeURIComponent(del.dataset.delete)}`, { method: 'DELETE' });
     await refresh();
+    return;
+  }
+
+  const approve = event.target.closest('[data-approve]');
+  if (approve) {
+    approve.disabled = true;
+    await post(`/api/meeting/approve/${encodeURIComponent(approve.dataset.approve)}`);
+    return;
+  }
+
+  const action = event.target.closest('[data-meeting]');
+  if (action) {
+    action.disabled = true;
+    // `process` reuses the stop endpoint's hand-off: both mean "take it from here".
+    const route = action.dataset.meeting === 'process' ? 'stop' : action.dataset.meeting;
+    await post(`/api/meeting/${route}`);
   }
 });
 
 refresh();
-setInterval(refresh, 4000);
+// A recording needs a live clock, but /api/state enumerates every process to count
+// listeners — far too expensive to run every second. Two intervals, not one.
+setInterval(refreshMeeting, 1000);
+setInterval(refreshState, 4000);
 </script>
 </body>
 </html>

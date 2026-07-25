@@ -93,12 +93,15 @@ install_prebuilt() {
   mkdir -p "$BIN_DIR"
   stop_listener
   install -m 755 "$TMP_DIR/wisper" "$BIN_DIR/wisper"
-  [ -f "$TMP_DIR/nextbase" ] && install -m 755 "$TMP_DIR/nextbase" "$BIN_DIR/nextbase"
+  for extra in nextbase nbmeet; do
+    [ -f "$TMP_DIR/$extra" ] && install -m 755 "$TMP_DIR/$extra" "$BIN_DIR/$extra"
+  done
 
   # Downloaded binaries are quarantined until signing and notarization are set up.
   if [ "$OS" = "apple-darwin" ]; then
-    xattr -d com.apple.quarantine "$BIN_DIR/wisper" 2>/dev/null || true
-    xattr -d com.apple.quarantine "$BIN_DIR/nextbase" 2>/dev/null || true
+    for binary in wisper nextbase nbmeet; do
+      xattr -d com.apple.quarantine "$BIN_DIR/$binary" 2>/dev/null || true
+    done
   fi
   return 0
 }
@@ -125,8 +128,9 @@ install_from_source() {
   ( cd "$src" && cargo install --path crates/nextbase-cli --locked --root "$TMP_DIR/out" ) || return 1
 
   mkdir -p "$BIN_DIR"
-  install -m 755 "$TMP_DIR/out/bin/wisper" "$BIN_DIR/wisper"
-  install -m 755 "$TMP_DIR/out/bin/nextbase" "$BIN_DIR/nextbase"
+  for binary in wisper nextbase nbmeet; do
+    install -m 755 "$TMP_DIR/out/bin/$binary" "$BIN_DIR/$binary"
+  done
   return 0
 }
 
@@ -186,6 +190,11 @@ say "Next:"
 say "  wisper setup     Choose a model, paste an API key, pick a shortcut"
 say "  wisper doctor    Check permissions, microphone, and shortcuts"
 say "  wisper listen    Start the background listener"
+say ""
+say "Meeting Agent (records a meeting and writes the notes):"
+say "  nbmeet setup     Paste a Sarvam key for transcription"
+say "  nbmeet doctor    Check the microphone and system audio"
+say "  nbmeet start     Start recording — nbmeet stop when it ends"
 
 if [ "$OS" = "apple-darwin" ]; then
   say ""

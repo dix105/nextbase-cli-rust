@@ -32,7 +32,7 @@ function Stop-Listener {
     $existing = Join-Path $BinDir 'wisper.exe'
     if (Test-Path $existing) { & $existing stop 2>$null | Out-Null }
   } catch {}
-  Get-Process -Name 'wisper', 'nextbase' -ErrorAction SilentlyContinue |
+  Get-Process -Name 'wisper', 'nextbase', 'nbmeet' -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
 }
@@ -60,9 +60,11 @@ function Install-Prebuilt {
   New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
   Stop-Listener
   Copy-Item -Force $exe.FullName (Join-Path $BinDir 'wisper.exe')
-  $umbrella = Get-ChildItem -Path (Join-Path $Tmp 'unpacked') -Filter 'nextbase.exe' -Recurse |
-    Select-Object -First 1
-  if ($umbrella) { Copy-Item -Force $umbrella.FullName (Join-Path $BinDir 'nextbase.exe') }
+  foreach ($extra in @('nextbase.exe', 'nbmeet.exe')) {
+    $found = Get-ChildItem -Path (Join-Path $Tmp 'unpacked') -Filter $extra -Recurse |
+      Select-Object -First 1
+    if ($found) { Copy-Item -Force $found.FullName (Join-Path $BinDir $extra) }
+  }
   return $true
 }
 
@@ -94,8 +96,9 @@ function Install-FromSource {
   }
 
   New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-  Copy-Item -Force (Join-Path $Tmp 'out\bin\wisper.exe')   (Join-Path $BinDir 'wisper.exe')
-  Copy-Item -Force (Join-Path $Tmp 'out\bin\nextbase.exe') (Join-Path $BinDir 'nextbase.exe')
+  foreach ($binary in @('wisper.exe', 'nextbase.exe', 'nbmeet.exe')) {
+    Copy-Item -Force (Join-Path $Tmp "out\bin\$binary") (Join-Path $BinDir $binary)
+  }
   return $true
 }
 
@@ -129,6 +132,11 @@ Install Rust from https://rustup.rs and re-run this script.
   Say '  wisper setup     Choose a model, paste an API key, pick a shortcut'
   Say '  wisper doctor    Check microphone and shortcuts'
   Say '  wisper listen    Start the background listener'
+  Say ''
+  Say 'Meeting Agent (records a meeting and writes the notes):'
+  Say '  nbmeet setup     Paste a Sarvam key for transcription'
+  Say '  nbmeet doctor    Check the microphone and system audio'
+  Say '  nbmeet start     Start recording - nbmeet stop when it ends'
 } finally {
   Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }

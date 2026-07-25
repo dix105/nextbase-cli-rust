@@ -1,13 +1,16 @@
 # Nextbase CLI (Rust)
 
-Rust rewrite of the Nextbase CLI. `nextbase` is the umbrella command; **Wisper**
-(hold-to-record dictation) is its first and currently only tool. NoteBot is out of
-scope here.
+Rust rewrite of the Nextbase CLI. `nextbase` is the umbrella command with two tools:
+
+- **Wisper** — hold-to-record dictation, paste, polish, spell fix.
+- **Meeting Agent** — record a meeting, transcribe it with speaker labels, get notes.
 
 ```bash
-nextbase                    # what this installs, where to start
-nextbase wisper <command>   # namespaced
-wisper <command>            # same thing, direct
+nextbase                     # what this installs, where to start
+nextbase wisper <command>    # namespaced
+nextbase meeting <command>
+wisper <command>             # same thing, direct
+nbmeet <command>
 ```
 
 ## What the rewrite removed
@@ -42,8 +45,8 @@ iwr -useb https://raw.githubusercontent.com/dix105/nextbase-cli-rust/main/instal
 ```
 
 The installer downloads a prebuilt binary for your platform, stops any listener
-still holding the old one, puts `wisper` and `nextbase` on your `PATH`, and prints
-what to do next. If no prebuilt binary exists for your platform it falls back to
+still holding the old one, puts `wisper`, `nextbase` and `nbmeet` on your `PATH`, and
+prints what to do next. If no prebuilt binary exists for your platform it falls back to
 building from source, which needs [Rust](https://rustup.rs) but still not git.
 
 It never overwrites a previous TypeScript install: that `wisper` is renamed to
@@ -94,11 +97,12 @@ wisper update           # install the latest release over this one
 wisper update --check   # only report whether one exists
 ```
 
-No `curl` re-run needed. It downloads the release binaries, refuses to install
-anything that does not run, stops the listener for the swap (Windows will not
-replace a running executable at all), and restarts it afterwards — through the
-login launcher if one owns it, so launchd cannot respawn the listener from a
-half-written binary.
+No `curl` re-run needed. All three binaries are replaced together — they share the
+core, so a new `wisper` beside an old `nbmeet` is not a state worth allowing. It
+downloads the release binaries, refuses to install anything that does not run, stops
+the listener for the swap (Windows will not replace a running executable at all), and
+restarts it afterwards — through the login launcher if one owns it, so launchd cannot
+respawn the listener from a half-written binary.
 
 The listener also checks periodically and writes a line to `wisper logs` when a
 release is out; `wisper autoupdate on|off|status` controls that. It never installs
@@ -110,17 +114,85 @@ silently dead.
 
 ```bash
 wisper autostart off
-rm -f ~/.local/bin/wisper ~/.local/bin/nextbase
+rm -f ~/.local/bin/wisper ~/.local/bin/nextbase ~/.local/bin/nbmeet
 rm -rf ~/.wisper-cli        # also removes config, keys, and history
+rm -rf ~/.nextbase          # meeting recordings, transcripts, and notes
 ```
+
+## Meeting Agent
+
+```bash
+nbmeet setup     # paste a Sarvam key (transcription) and a Groq key (summaries)
+nbmeet doctor    # microphone, system audio, permissions, keys
+nbmeet start     # record
+nbmeet stop      # stop, transcribe, summarise
+nbmeet open      # dashboard, with start and stop buttons
+```
+
+Four files land in `~/.nextbase/meetings/<id>/`: `meeting-note.md`,
+`full-diarized-transcript.md`, `full-transcript.txt` and `processing-metadata.json`.
+Config and API keys are shared with Wisper, so a Sarvam key saved by either tool works
+in both.
+
+### It records both sides
+
+A meeting recorded from the microphone alone transcribes half a conversation — the
+other participants are coming out of your speakers, not sitting in the room. So the
+microphone and the system output are captured together and mixed into one 16 kHz mono
+WAV (two hours is ~115 MB rather than ~690 MB at 48 kHz, and Sarvam takes 16 kHz PCM
+natively).
+
+- **macOS** uses ScreenCaptureKit, which needs Screen Recording permission — `nbmeet
+  doctor` asks for it. Requires macOS 13+.
+- **Windows** uses WASAPI loopback on the default playback device.
+- **Linux** uses the PulseAudio/PipeWire monitor source.
+
+`nbmeet doctor` probes each source separately and says whether it actually *heard*
+anything, because a meeting recorded with a silently broken system source looks
+completely fine until the far side is missing from the transcript. If a source stayed
+silent for a whole recording, the note says so.
+
+### The sample gate
+
+After recording, a three-minute window — chosen by RMS energy, so it does not land on
+the silence and "can you hear me" that opens every recording — is transcribed twice, in
+Sarvam's `transcribe` and `codemix` modes, as two concurrent jobs. Both are shown with
+what was measured: elapsed time, timestamp coverage, diarized segment and speaker-label
+counts, and the provider's language detection. You pick one, or reject.
+
+This exists because a transcript that reads well can still corrupt names, numbers and
+commitments, and for Gujarati/Hindi/English speech the two modes differ exactly there.
+Nothing reports an accuracy percentage, because nothing here can measure one — language
+detection says which language was heard, not whether the words are right.
+
+`nbmeet gate off` skips it and transcribes immediately in the last approved mode.
+
+### What it will not do
+
+Speaker labels stay generic (`SPEAKER_00`) and are never presented as people. An action
+item only carries an owner when the transcript assigned it outright: an owner paired
+with anything weaker is dropped and the task marked `suggested`, so an inference never
+reads as a commitment somebody made. Every note states that the audio remains the
+source of truth.
+
+A failure never costs the recording. Anything that goes wrong after `stop` rolls back
+to "recorded" and tells you to run `nbmeet process`; a Groq failure still delivers the
+transcript without a summary.
 
 ## Layout
 
 ```
-crates/nextbase-core   config, storage, log, shortcuts, providers, audio,
-                       hotkeys, paste, autostart, process state, updater
-crates/nextbase-cli    clap surface, setup wizard, listener, dashboard, binaries
+crates/nextbase-core     config, storage, log, shortcuts, providers, audio,
+                         hotkeys, paste, autostart, process state, updater,
+                         Sarvam Batch, WAV slicing, meeting capture
+crates/nextbase-meeting  meeting state machine, recorder, sample gate,
+                         Groq analysis, deliverables
+crates/nextbase-cli      clap surface, setup wizards, listener, dashboard,
+                         three binaries
 ```
+
+`nextbase-core` holds anything platform-shaped or shared; meeting *policy* lives in
+`nextbase-meeting` so Wisper's build does not carry it.
 
 ## On-disk compatibility
 
@@ -204,14 +276,18 @@ an auth failure.
    would register the same shortcuts and one press would fire twice. `wisper
    autostart on` refuses while `com.wisper.cli` exists:
    `launchctl bootout gui/$(id -u)/com.wisper.cli`
-3. **Verify Windows.** The hotkey, paste, and autostart code cannot be compiled from
-   macOS: `rustls` pulls in `ring`, whose build script needs a Windows C toolchain.
-   The CI job on `windows-latest` is the only check it gets.
+3. **Verify Windows.** The hotkey, paste, autostart and WASAPI loopback code cannot be
+   compiled from macOS: `rustls` pulls in `ring`, whose build script needs a Windows C
+   toolchain. The CI job on `windows-latest` is the only check any of it gets, and
+   loopback capture has never actually been run.
 4. **Add signing secrets.** `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`,
    `MACOS_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`.
    Unsigned binaries hit Gatekeeper, and re-signing with a different identity
    invalidates the Accessibility grant from step 1.
-5. **Live provider smoke test.** Nothing here has made a real API call yet.
+5. **Live provider smoke test.** Nothing here has made a real transcription API call
+   yet — including the meeting sample gate and full run, which need a Sarvam key that
+   is not on the development machine. Everything up to the upload is verified; the
+   Batch lifecycle is covered only by fixtures.
 
 ## Known gaps
 
@@ -219,6 +295,11 @@ an auth failure.
   bare per-platform binaries it downloads were not published until then. Older
   installs need one more `curl`/`iwr` run to reach v0.1.5, after which `wisper
   update` works.
+- Meeting Agent needs macOS 13+ for system audio: ScreenCaptureKit is the only way to
+  capture it without making the user install a virtual audio device. Linking its Swift
+  bridge also means the binaries carry an rpath to `/usr/lib/swift`.
+- A meeting over 40 hours cannot be transcribed in one job (2 hours per file × 20
+  files). It is refused with that explanation rather than submitted and failed.
 - Recording uses the device's native sample rate (48 kHz here) rather than SoX's
   fixed 16 kHz. Providers resample server side, so this only costs upload size —
   roughly 3× — and a `rubato` resampler would remove it.

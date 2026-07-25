@@ -57,7 +57,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k actions "$KEYCHAIN"
           rm certificate.p12
 
-          for binary in nextbase wisper; do
+          for binary in nextbase wisper nbmeet; do
             codesign --force --options runtime --timestamp \
               --sign "$SIGNING_IDENTITY" \
               "target/${{ matrix.target }}/release/$binary"
@@ -78,15 +78,15 @@ jobs:
           built="target/${{ matrix.target }}/release"
 
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "dist/$name.zip" "./$built/nextbase.exe" "./$built/wisper.exe"
+            7z a "dist/$name.zip" "./$built/nextbase.exe" "./$built/wisper.exe" "./$built/nbmeet.exe"
           else
-            tar -czf "dist/$name.tar.gz" -C "$built" nextbase wisper
+            tar -czf "dist/$name.tar.gz" -C "$built" nextbase wisper nbmeet
           fi
 
           # The archives above are what the installers fetch. `wisper update` takes
           # these bare binaries instead, so it needs no archive handling on the
           # client — one download and a rename.
-          for binary in nextbase wisper; do
+          for binary in nextbase wisper nbmeet; do
             if [ "${{ runner.os }}" = "Windows" ]; then
               cp "$built/$binary.exe" "dist/$binary-${{ matrix.target }}.exe"
             else

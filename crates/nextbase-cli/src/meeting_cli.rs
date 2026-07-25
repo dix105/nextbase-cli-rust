@@ -67,6 +67,9 @@ pub enum MeetingCommand {
     History { limit: Option<usize> },
     /// Check capture sources, permissions and keys
     Doctor,
+    /// Open the local dashboard, where a meeting can be started and stopped
+    #[command(alias = "app")]
+    Open { port: Option<u16> },
     /// Require sample approval before each full run: `gate on|off|status`
     Gate {
         #[arg(trailing_var_arg = true)]
@@ -89,6 +92,7 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::Process { id }) => process(id.as_deref()).await,
         Some(MeetingCommand::History { limit }) => history(limit),
         Some(MeetingCommand::Doctor) => doctor(),
+        Some(MeetingCommand::Open { port }) => crate::commands::open(port).await,
         Some(MeetingCommand::Gate { args }) => gate(&args),
         Some(MeetingCommand::RecordInternal { id }) => recorder::run(&id),
     }
@@ -112,6 +116,7 @@ fn overview() -> Result<()> {
     ui::info("nbmeet stop       Stop, transcribe, summarise");
     ui::info("nbmeet doctor     Check microphone, system audio and keys");
     ui::info("nbmeet history    Past meetings");
+    ui::info("nbmeet open       Dashboard, with start and stop buttons");
     println!();
     ui::hint("Full list: nbmeet --help");
     Ok(())

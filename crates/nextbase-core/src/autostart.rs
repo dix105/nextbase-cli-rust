@@ -61,6 +61,41 @@ pub fn spawn_detached() -> Result<u32> {
 /// rather than each getting its own half-right copy.
 pub fn spawn_detached_with(args: &[&str]) -> Result<u32> {
     let exe = current_exe()?;
+    spawn_binary_detached(&exe, args)
+}
+
+/// Find a sibling binary of this one by name.
+///
+/// The dashboard is served by `wisper` but hands meeting work to `nbmeet`, so it needs
+/// to reach a *different* binary from the same install rather than re-invoking itself
+/// with a subcommand it does not have.
+pub fn sibling_binary(name: &str) -> Result<PathBuf> {
+    let exe = current_exe()?;
+    let stem = exe
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if stem == name.to_lowercase() {
+        return Ok(exe);
+    }
+
+    let candidate = exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "Could not find {name} next to {}. Re-run the installer so all binaries are in one place.",
+        exe.display()
+    )
+}
+
+/// Spawn a sibling binary detached — same session and console handling as above.
+pub fn spawn_sibling_detached(name: &str, args: &[&str]) -> Result<u32> {
+    let binary = sibling_binary(name)?;
+    spawn_binary_detached(&binary, args)
+}
+
+fn spawn_binary_detached(exe: &std::path::Path, args: &[&str]) -> Result<u32> {
     let mut command = Command::new(exe);
     command
         .args(args)
@@ -95,7 +130,9 @@ pub fn spawn_detached_with(args: &[&str]) -> Result<u32> {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 
-    let child = command.spawn().context("Could not start the listener")?;
+    let child = command
+        .spawn()
+        .with_context(|| format!("Could not start {}", exe.display()))?;
     Ok(child.id())
 }
 
