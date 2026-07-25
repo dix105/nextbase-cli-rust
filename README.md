@@ -146,6 +146,22 @@ CI uses `stable`, which can be ahead of your local toolchain and therefore knows
 lints yours does not — that is how the first CI run failed while local clippy was
 clean. Run `rustup update` before pushing.
 
+### CI cost
+
+Windows runners are roughly 5x slower per step than macOS, so the shape of CI
+matters there. Measured: the first green run took 15.7 min, of which
+`cargo build --release` was 449s on its own and clippy/test ran serially for
+another 350s. Restructuring — release build only on tags, clippy and test as
+concurrent jobs with separate cache keys, no debug info, `fmt` on Linux — brought
+it to 5.2 min.
+
+The largest remaining lever is `ring`, pulled in by `rustls` for TLS. Its build
+script needs a C toolchain, which is both slow on Windows and the reason the
+Windows target cannot be checked from macOS. Switching `reqwest` to `native-tls`
+would remove it and use SChannel on Windows and Security.framework on macOS —
+which also means the OS trust store, so corporate TLS interception starts working.
+The cost is that Linux builds would then need OpenSSL.
+
 Test against a sandboxed config instead of your own — `HOME` is honoured
 everywhere, exactly as Node's `os.homedir()` does:
 
