@@ -19,6 +19,9 @@ pub struct Nextbase {
 pub enum Tool {
     /// Wisper — hold-to-record dictation, paste, polish, spell fix
     Wisper(WisperArgs),
+    /// Meeting Agent — record a meeting, transcribe it, get notes
+    #[command(alias = "nbmeet")]
+    Meeting(crate::meeting_cli::MeetingArgs),
 }
 
 #[derive(Debug, Parser)]

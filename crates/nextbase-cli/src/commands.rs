@@ -331,7 +331,7 @@ pub async fn spell(args: &[String]) -> Result<()> {
 ///
 /// The TypeScript setup printed the verification failure and saved the key
 /// anyway, so a typo surfaced much later as a failed dictation.
-async fn ask_provider_key(provider: Provider) -> Result<String> {
+pub(crate) async fn ask_provider_key(provider: Provider) -> Result<String> {
     require_interactive("Entering an API key")?;
 
     loop {

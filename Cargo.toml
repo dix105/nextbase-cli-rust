@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nextbase-core", "crates/nextbase-cli"]
+members = ["crates/nextbase-core", "crates/nextbase-meeting", "crates/nextbase-cli"]
 resolver = "2"
 
 [workspace.package]

@@ -12,8 +12,13 @@ path = "src/bin/nextbase.rs"
 name = "wisper"
 path = "src/bin/wisper.rs"
 
+[[bin]]
+name = "nbmeet"
+path = "src/bin/nbmeet.rs"
+
 [dependencies]
 nextbase-core = { path = "../nextbase-core" }
+nextbase-meeting = { path = "../nextbase-meeting" }
 anyhow.workspace = true
 serde_json.workspace = true
 axum = "0.8"

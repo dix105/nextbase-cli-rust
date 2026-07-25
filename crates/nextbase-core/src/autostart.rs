@@ -51,10 +51,19 @@ fn current_exe() -> Result<PathBuf> {
 
 /// Spawn the listener in a new session so it outlives the terminal that started it.
 pub fn spawn_detached() -> Result<u32> {
+    spawn_detached_with(&["_listen"])
+}
+
+/// Spawn this binary detached with `args`.
+///
+/// The meeting recorder needs exactly the same treatment as the Wisper listener — a
+/// new session on unix, no inherited console on Windows — so both go through here
+/// rather than each getting its own half-right copy.
+pub fn spawn_detached_with(args: &[&str]) -> Result<u32> {
     let exe = current_exe()?;
     let mut command = Command::new(exe);
     command
-        .arg("_listen")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

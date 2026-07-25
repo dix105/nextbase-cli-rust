@@ -2,12 +2,14 @@ pub mod cli;
 pub mod commands;
 pub mod dashboard;
 pub mod listener;
+pub mod meeting_cli;
 pub mod tui;
 pub mod ui;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Nextbase, Tool, WisperCli, WisperCommand};
+use meeting_cli::MeetingCli;
 
 pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
     let Some(command) = command else {
@@ -56,26 +58,33 @@ fn wisper_overview() -> Result<()> {
     Ok(())
 }
 
-/// Bare `nextbase`: name the tools. With one tool a picker would be theatre, so
-/// this stays a directory until a second tool lands.
+/// Bare `nextbase`: name the tools and how to reach them.
 fn nextbase_overview() -> Result<()> {
     ui::heading("Nextbase CLI");
     println!();
-    ui::info("wisper   Hold-to-record dictation, paste, polish, spell fix");
+    ui::info("wisper    Hold-to-record dictation, paste, polish, spell fix");
+    ui::info("meeting   Record a meeting, transcribe it, get notes");
     println!();
     ui::heading("Usage");
-    ui::info("nextbase wisper <command>   Run a Wisper command");
-    ui::info("wisper <command>            Same thing, direct");
+    ui::info("nextbase wisper <command>    Run a Wisper command");
+    ui::info("nextbase meeting <command>   Run a Meeting Agent command");
+    ui::info("wisper <command>             Same thing, direct");
+    ui::info("nbmeet <command>             Same thing, direct");
     println!();
-    ui::hint("Start here: nextbase wisper setup");
+    ui::hint("Start here: nextbase wisper setup — or nextbase meeting setup");
     Ok(())
 }
 
 pub async fn run_nextbase() -> Result<()> {
     match Nextbase::parse().tool {
         Some(Tool::Wisper(args)) => dispatch(args.command).await,
+        Some(Tool::Meeting(args)) => meeting_cli::dispatch(args.command).await,
         None => nextbase_overview(),
     }
+}
+
+pub async fn run_meeting() -> Result<()> {
+    meeting_cli::dispatch(MeetingCli::parse().command).await
 }
 
 pub async fn run_wisper() -> Result<()> {
