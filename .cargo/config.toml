@@ -1,0 +1,12 @@
+# ScreenCaptureKit capture links a Swift bridge, and dyld resolves its
+# `@rpath/libswift_*.dylib` references at process startup — for *every* binary that
+# links nextbase-core, including test binaries. Without this rpath they abort before
+# main with "Library not loaded … no LC_RPATH's found", whether or not the test
+# touches audio capture.
+#
+# `nextbase-cli/build.rs` emits the same flag for the shipped binaries, because a
+# build with `RUSTFLAGS` set overrides this file and the released binaries must never
+# lose it. Test binaries cannot be covered from a build script:
+# `rustc-link-arg-tests` is not a stable instruction.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

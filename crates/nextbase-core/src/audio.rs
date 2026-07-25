@@ -51,7 +51,7 @@ pub struct LiveLevel {
 }
 
 impl LiveLevel {
-    fn publish(&self, levels: Levels) {
+    pub(crate) fn publish(&self, levels: Levels) {
         self.peak.store(levels.peak.to_bits(), Ordering::Relaxed);
         self.rms.store(levels.rms.to_bits(), Ordering::Relaxed);
     }

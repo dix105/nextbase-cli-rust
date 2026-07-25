@@ -140,6 +140,26 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update_interval_minutes: Option<u64>,
 
+    // ---- Meeting Agent ----
+    /// Record the microphone. Off would mean capturing only the far side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_capture_mic: Option<bool>,
+    /// Record system output — the other participants on a call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_capture_system: Option<bool>,
+    /// Also keep an unmixed WAV per source, for diagnosing which side went wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_keep_tracks: Option<bool>,
+    /// Require sample approval before every full transcription. Defaults to on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_gate: Option<bool>,
+    /// Transcription mode the last approved sample settled on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_mode: Option<String>,
+    /// Recorded once the user has agreed that meeting audio is uploaded to Sarvam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting_consent: Option<bool>,
+
     /// Anything this build does not know about is carried through untouched, so
     /// writing config from the Rust CLI never drops a setting the TypeScript CLI
     /// still owns.
@@ -174,6 +194,20 @@ impl Config {
 
     pub fn polish_model_or_default(&self) -> &str {
         self.polish_model.as_deref().unwrap_or(DEFAULT_POLISH_MODEL)
+    }
+
+    /// Which sources a meeting records. Both default to on: a meeting recorded from
+    /// the microphone alone transcribes half a conversation.
+    pub fn meeting_capture(&self) -> (bool, bool) {
+        (
+            self.meeting_capture_mic != Some(false),
+            self.meeting_capture_system != Some(false),
+        )
+    }
+
+    /// Whether a sample must be approved before the full transcription runs.
+    pub fn meeting_gate_enabled(&self) -> bool {
+        self.meeting_gate != Some(false)
     }
 
     pub fn is_configured(&self) -> bool {
