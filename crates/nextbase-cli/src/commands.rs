@@ -35,7 +35,33 @@ fn prompt_error(error: InquireError) -> anyhow::Error {
 
 pub fn status() -> Result<()> {
     let config = config::load();
-    ui::heading("Wisper setup");
+
+    // Readiness first. A wall of "not set" was the old answer to "is this working?", and
+    // it never actually said.
+    ui::heading("Wisper");
+    if !config.is_configured() {
+        ui::failure("Not set up yet — dictation will not work.");
+        ui::hint("Run: wisper setup");
+        println!();
+    } else {
+        let listeners = process_state::other_listener_pids().len();
+        match listeners {
+            0 => {
+                ui::warn("Ready, but the listener is not running.");
+                ui::hint("Start it: wisper listen");
+            }
+            1 => ui::success("Ready. Listener running."),
+            many => {
+                ui::failure(&format!(
+                    "{many} listeners are running — every press fires twice."
+                ));
+                ui::hint("Fix it: wisper stop, then wisper listen");
+            }
+        }
+        println!();
+    }
+
+    ui::heading("Settings");
     ui::field(
         "Provider",
         config
@@ -146,7 +172,13 @@ pub fn add(text: &[String]) -> Result<()> {
 }
 
 pub fn logs() -> Result<()> {
-    print!("{}", log::read_logs());
+    let logs = log::read_logs();
+    // Ends without a newline when empty, which ran the shell prompt into the message.
+    if logs.ends_with('\n') {
+        print!("{logs}");
+    } else {
+        println!("{logs}");
+    }
     Ok(())
 }
 
@@ -448,17 +480,26 @@ fn list_wisper_models(config: &config::Config) {
 async fn apply_model(option: &config::ModelOption, config: &config::Config) -> Result<()> {
     let provider = option.provider;
 
-    // Reuse a saved key rather than asking again: the same provider may already be
-    // configured for the other tool.
+    // A saved key is reused by default — the same provider may already be configured for
+    // the other tool — but there has to be a way to replace one, which there was not.
     let existing = config
         .key_for(provider)
         .filter(|key| !key.is_empty())
         .map(|key| key.to_string());
     let key = match existing {
-        Some(key) => {
-            ui::info(&format!("Using the {provider} key already saved."));
-            key
+        Some(saved) if std::io::stdin().is_terminal() => {
+            let keep = Confirm::new(&format!("Keep the saved {provider} key?"))
+                .with_default(true)
+                .with_help_message("No to paste a different one")
+                .prompt()
+                .unwrap_or(true);
+            if keep {
+                saved
+            } else {
+                ask_provider_key(provider).await?
+            }
         }
+        Some(saved) => saved,
         None => ask_provider_key(provider).await?,
     };
 
@@ -477,6 +518,63 @@ async fn apply_model(option: &config::ModelOption, config: &config::Config) -> R
         "Meetings are unaffected — they stay on {}. Change that with: nbmeet model",
         config::load().meeting_model_or_default()
     ));
+    Ok(())
+}
+
+/// Show or replace stored API keys.
+///
+/// There was no way to change a key once saved: every path that needed one reused it
+/// silently. Keys are shared between the tools, so replacing one here changes it for
+/// both — which is said out loud rather than left to be discovered.
+pub async fn key(name: Option<&str>) -> Result<()> {
+    let config = config::load();
+
+    let Some(name) = name else {
+        ui::heading("API keys");
+        for provider in Provider::ALL {
+            let saved = config
+                .key_for(provider)
+                .filter(|key| !key.is_empty())
+                .is_some();
+            ui::info(&format!(
+                "{} {:<16} {}",
+                if saved { "→" } else { " " },
+                provider.as_str(),
+                if saved { "saved" } else { "not set" }
+            ));
+        }
+        println!();
+        ui::hint("Replace or add one with: wisper key <provider>");
+        ui::hint("Keys are shared with Meeting Agent; models are not.");
+        return Ok(());
+    };
+
+    let provider: Provider = name.trim().to_lowercase().parse().map_err(|_| {
+        let names: Vec<&str> = Provider::ALL.iter().map(|p| p.as_str()).collect();
+        anyhow::anyhow!("Unknown provider \"{name}\". One of: {}", names.join(", "))
+    })?;
+
+    let had_key = config
+        .key_for(provider)
+        .filter(|key| !key.is_empty())
+        .is_some();
+    if had_key {
+        // Never shown, not even partially: there is no reason to put a secret on screen.
+        ui::info(&format!(
+            "A {provider} key is already saved. Pasting one replaces it."
+        ));
+    }
+
+    let key = ask_provider_key(provider).await?;
+    config::update(|c| c.set_key(provider, key))?;
+
+    ui::success(&format!(
+        "{provider} key {}.",
+        if had_key { "replaced" } else { "saved" }
+    ));
+    if config::load().provider == Some(provider) {
+        ui::hint("Restart the listener to pick it up: wisper restart");
+    }
     Ok(())
 }
 
@@ -1378,7 +1476,21 @@ pub fn doctor() -> Result<()> {
 }
 
 pub async fn open(port: Option<u16>) -> Result<()> {
-    let url = crate::dashboard::serve(port.unwrap_or(3838)).await?;
+    let port = port.unwrap_or(3838);
+
+    // Both tools serve the same two-tab dashboard, so running `nbmeet open` while
+    // `wisper open` is up used to fail on the bound port. Opening the one that is already
+    // there is what the user wanted either way.
+    if crate::dashboard::already_serving(port).await {
+        let url = format!("http://127.0.0.1:{port}");
+        crate::dashboard::open_in_browser(&url);
+        ui::success(&format!(
+            "Dashboard is already running at {url} — opened it."
+        ));
+        return Ok(());
+    }
+
+    let url = crate::dashboard::serve(port).await?;
     crate::dashboard::open_in_browser(&url);
     ui::success(&format!("Dashboard running at {url}"));
     ui::hint("Press Ctrl+C to stop.");

@@ -55,6 +55,11 @@ pub enum WisperCommand {
         /// Model or provider name. Omit to choose from a list.
         name: Option<String>,
     },
+    /// Show or replace a stored API key: `key [provider]`
+    Key {
+        /// Provider whose key to set. Omit to list them.
+        name: Option<String>,
+    },
     /// Show the current setup
     Status,
     /// Show configured shortcuts and the keys each platform supports

@@ -515,6 +515,47 @@ fn problem(status: StatusCode, message: &str) -> (StatusCode, Json<serde_json::V
     (status, Json(json!({"error": message})))
 }
 
+/// Whether our dashboard is already answering on `port`.
+///
+/// Checked by asking for a known endpoint rather than just probing the socket: something
+/// unrelated on that port must not be mistaken for the dashboard and opened in a browser.
+pub async fn already_serving(port: u16) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Raw TCP rather than an HTTP client: this crate has no need of one otherwise, and
+    // the check is a single request.
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        stream
+            .write_all(
+                format!("GET /api/meeting HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .ok()?;
+
+        let mut response = Vec::new();
+        // Enough for the status line and the start of the body; the marker is small.
+        let mut buffer = [0u8; 2048];
+        while response.len() < 4096 {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => response.extend_from_slice(&buffer[..n]),
+            }
+        }
+        Some(String::from_utf8_lossy(&response).to_string())
+    };
+
+    // Identified by a field only this endpoint returns, so an unrelated service on the
+    // port is never mistaken for the dashboard and opened in a browser.
+    match tokio::time::timeout(std::time::Duration::from_millis(700), probe).await {
+        Ok(Some(body)) => body.contains("200 OK") && body.contains("\"active\""),
+        _ => false,
+    }
+}
+
 pub async fn serve(port: u16) -> Result<String> {
     let router = Router::new()
         .route("/", get(index))

@@ -76,6 +76,11 @@ pub enum MeetingCommand {
     /// Open the local dashboard, where a meeting can be started and stopped
     #[command(alias = "app")]
     Open { port: Option<u16> },
+    /// Show or replace an API key: `key [sarvam|groq]`
+    Key {
+        /// Which key to set. Omit to list them.
+        name: Option<String>,
+    },
     /// Choose the transcription and summary models: `model [name]`
     #[command(alias = "provider")]
     Model {
@@ -106,6 +111,7 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::History { limit }) => history(limit),
         Some(MeetingCommand::Doctor) => doctor(),
         Some(MeetingCommand::Open { port }) => crate::commands::open(port).await,
+        Some(MeetingCommand::Key { name }) => key(name.as_deref()).await,
         Some(MeetingCommand::Model { name }) => model(name.as_deref()),
         Some(MeetingCommand::Gate { args }) => gate(&args),
         Some(MeetingCommand::RecordInternal { id }) => recorder::run(&id),
@@ -114,6 +120,18 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
 
 fn overview() -> Result<()> {
     ui::heading("Meeting Agent");
+
+    // Readiness first: `start` refuses without a Sarvam key, so saying so here beats
+    // listing commands that will not run.
+    if let Err(error) = nextbase_meeting::check_ready() {
+        ui::failure(&error.to_string());
+        println!();
+    } else if !nextbase_meeting::has_summary_key() {
+        ui::warn("No Groq key: meetings transcribe but are not summarised.");
+        ui::hint("Add one: nbmeet key groq");
+        println!();
+    }
+
     match state::load() {
         Some(meeting) => {
             ui::field("Active meeting", &meeting.id);
@@ -132,6 +150,7 @@ fn overview() -> Result<()> {
     ui::info("nbmeet history    Past meetings");
     ui::info("nbmeet audio <f>  Transcribe a file or URL you already have");
     ui::info("nbmeet model      Choose the transcription and summary models");
+    ui::info("nbmeet key        Show or replace the API keys");
     ui::info("nbmeet open       Dashboard, with start and stop buttons");
     println!();
     ui::hint("Full list: nbmeet --help");
@@ -1044,6 +1063,63 @@ fn report_probe(probe: &capture::SourceProbe) {
     }
 }
 
+/// Show or replace the two keys meetings need.
+///
+/// Only these two, because they are the ones this tool uses — but they are the same
+/// entries Wisper reads, so replacing one changes it for both. Said out loud rather than
+/// left to be discovered.
+async fn key(name: Option<&str>) -> Result<()> {
+    let settings = config::load();
+
+    let Some(name) = name else {
+        ui::heading("API keys");
+        for (provider, purpose) in [
+            (Provider::Sarvam, "transcription (required)"),
+            (Provider::Groq, "summaries and action items"),
+        ] {
+            let saved = settings
+                .key_for(provider)
+                .filter(|key| !key.is_empty())
+                .is_some();
+            ui::info(&format!(
+                "{} {:<10} {:<30} {}",
+                if saved { "→" } else { " " },
+                provider.as_str(),
+                purpose,
+                if saved { "saved" } else { "not set" }
+            ));
+        }
+        println!();
+        ui::hint("Replace or add one with: nbmeet key sarvam");
+        ui::hint("Shared with Wisper — the models are not.");
+        return Ok(());
+    };
+
+    let provider = match name.trim().to_lowercase().as_str() {
+        "sarvam" => Provider::Sarvam,
+        "groq" => Provider::Groq,
+        other => bail!("Meetings use the sarvam and groq keys. Got \"{other}\"."),
+    };
+
+    let had_key = settings
+        .key_for(provider)
+        .filter(|key| !key.is_empty())
+        .is_some();
+    if had_key {
+        ui::info(&format!(
+            "A {provider} key is already saved. Pasting one replaces it."
+        ));
+    }
+
+    let key = crate::commands::ask_provider_key(provider).await?;
+    config::update(|c| c.set_key(provider, key))?;
+    ui::success(&format!(
+        "{provider} key {}.",
+        if had_key { "replaced" } else { "saved" }
+    ));
+    Ok(())
+}
+
 /// Choose which models meetings use.
 ///
 /// Entirely separate from `wisper model`: the two tools share this config file and the
@@ -1170,10 +1246,10 @@ fn list_meeting_models(settings: &config::Config) {
 
     println!();
     // Named here as well, because one config file holds both tools' settings.
-    ui::hint(&format!(
-        "Dictation uses its own model: {}. See: wisper model",
-        settings.model.as_deref().unwrap_or("not set")
-    ));
+    ui::hint(&match settings.model.as_deref() {
+        Some(model) => format!("Dictation uses its own model ({model}). See: wisper model"),
+        None => "Dictation has its own model, not yet set. See: wisper model".to_string(),
+    });
 }
 
 /// Explain what picking a mode-less model costs, rather than letting the gate change

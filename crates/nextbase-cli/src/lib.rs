@@ -19,6 +19,7 @@ pub async fn dispatch(command: Option<WisperCommand>) -> Result<()> {
     match command {
         WisperCommand::Setup { update } => commands::setup(update).await,
         WisperCommand::Model { name } => commands::provider(name.as_deref()).await,
+        WisperCommand::Key { name } => commands::key(name.as_deref()).await,
         WisperCommand::Status => commands::status(),
         WisperCommand::Shortcuts => commands::shortcuts(),
         WisperCommand::Shortcut { keys } => commands::set_shortcut(&keys),
