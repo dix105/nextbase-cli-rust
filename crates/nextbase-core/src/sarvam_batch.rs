@@ -530,11 +530,17 @@ pub async fn submit(
     )
     .await?;
 
+    let container = upload
+        .get("storage_container_type")
+        .or_else(|| created.get("storage_container_type"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+
     for (path, name) in files.iter().zip(&names) {
         let details = signed_url(&upload, "upload_urls", name)
             .with_context(|| format!("Sarvam did not return an upload URL for {name}."))?;
         progress(&format!("Uploading {name}"));
-        put_file(&client, &details, path).await?;
+        put_file(&client, &details, path, container.as_deref()).await?;
     }
 
     progress("Starting the job");
@@ -648,13 +654,50 @@ fn signed_url(payload: &serde_json::Value, field: &str, name: &str) -> Option<Si
     Some(SignedUrl { url, headers })
 }
 
-async fn put_file(client: &reqwest::Client, details: &SignedUrl, path: &Path) -> Result<()> {
+/// Whether a signed URL points at Azure Blob Storage.
+///
+/// Sarvam reports this as `storage_container_type`, but the host is checked too: the
+/// field is absent from some responses and the header below is mandatory, not optional.
+fn is_azure_blob(url: &str, container: Option<&str>) -> bool {
+    if let Some(container) = container {
+        let lower = container.to_lowercase();
+        if lower.starts_with("azure") {
+            return true;
+        }
+        // A container Sarvam names explicitly as something else must not get an Azure
+        // header: Google signed URLs reject headers they were not signed with.
+        if lower == "google" || lower == "local" {
+            return false;
+        }
+    }
+    url.contains(".blob.core.windows.net")
+}
+
+async fn put_file(
+    client: &reqwest::Client,
+    details: &SignedUrl,
+    path: &Path,
+    container: Option<&str>,
+) -> Result<()> {
     let bytes =
         std::fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
 
     let mut request = client.put(&details.url).body(bytes);
-    // Azure blob uploads reject a PUT without the metadata headers the URL was
-    // signed with, so they are replayed exactly as given.
+
+    // Azure's Put Blob requires `x-ms-blob-type` and answers 400 without it. Sarvam's
+    // own examples use the Azure SDK, which sets it for you, which is why their docs
+    // never mention it — a raw PUT has to send it itself. Skipping this is what made
+    // "Sarvam signed upload failed: HTTP 400" happen on every long meeting.
+    let already_typed = details
+        .headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("x-ms-blob-type"));
+    if is_azure_blob(&details.url, container) && !already_typed {
+        request = request.header("x-ms-blob-type", "BlockBlob");
+    }
+
+    // Anything the API did hand back is replayed as given: a signed URL rejects a
+    // request whose headers differ from the ones it was signed with.
     for (key, value) in &details.headers {
         request = request.header(key.as_str(), value.as_str());
     }
@@ -663,14 +706,52 @@ async fn put_file(client: &reqwest::Client, details: &SignedUrl, path: &Path) ->
         .send()
         .await
         .with_context(|| format!("Could not upload {}", path.display()))?;
+
     if !response.status().is_success() {
-        bail!(
-            "Uploading {} failed: HTTP {}",
-            path.display(),
-            response.status().as_u16()
-        );
+        let status = response.status().as_u16();
+        // Azure explains the refusal in the body. Reporting only the status code is
+        // what made the original failure impossible to diagnose.
+        let detail = response
+            .text()
+            .await
+            .ok()
+            .map(|body| azure_error_message(&body))
+            .filter(|message| !message.is_empty())
+            .map(|message| format!(" — {message}"))
+            .unwrap_or_default();
+        bail!("Uploading {} failed: HTTP {status}{detail}", path.display());
     }
     Ok(())
+}
+
+/// Pull the human part out of Azure's XML error body.
+fn azure_error_message(body: &str) -> String {
+    let between = |open: &str, close: &str| -> Option<String> {
+        let start = body.find(open)? + open.len();
+        let end = body[start..].find(close)? + start;
+        Some(body[start..end].trim().to_string())
+    };
+
+    let code = between("<Code>", "</Code>");
+    let message = between("<Message>", "</Message>")
+        // Azure appends a request id and timestamp on their own lines; the first line
+        // is the sentence worth showing.
+        .map(|message| {
+            message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        });
+
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code,
+        (None, Some(message)) => message,
+        // Not XML: show a short prefix rather than a wall of HTML.
+        (None, None) => body.trim().chars().take(200).collect(),
+    }
 }
 
 /// Poll status on widening intervals until the job reaches a terminal state.
@@ -1041,6 +1122,55 @@ mod tests {
     }
 
     #[test]
+    fn azure_uploads_are_detected_from_the_container_type_or_the_host() {
+        // Azure's Put Blob is 400 without x-ms-blob-type, and Sarvam's docs never
+        // mention it because their examples use the Azure SDK.
+        assert!(is_azure_blob(
+            "https://x.blob.core.windows.net/c/f",
+            Some("Azure")
+        ));
+        assert!(is_azure_blob(
+            "https://x.blob.core.windows.net/c/f",
+            Some("Azure_V1")
+        ));
+        // The field is missing from some responses, so the host is the fallback.
+        assert!(is_azure_blob(
+            "https://acct.blob.core.windows.net/c/f?sig=x",
+            None
+        ));
+
+        // A URL that is explicitly not Azure must not get the header: a Google signed
+        // URL rejects headers it was not signed with.
+        assert!(!is_azure_blob(
+            "https://storage.googleapis.com/c/f",
+            Some("Google")
+        ));
+        assert!(!is_azure_blob("http://127.0.0.1/c/f", Some("Local")));
+        assert!(!is_azure_blob("https://example.com/upload", None));
+    }
+
+    #[test]
+    fn azure_error_bodies_are_reduced_to_the_sentence_that_matters() {
+        // This is the body behind the bare "HTTP 400" that made the original failure
+        // impossible to diagnose.
+        let body = "<?xml version=\"1.0\"?><Error><Code>MissingRequiredHeader</Code>\
+<Message>An HTTP header that's mandatory for this request is not specified.\nRequestId:abc\nTime:2026-07-26</Message></Error>";
+        assert_eq!(
+            azure_error_message(body),
+            "MissingRequiredHeader: An HTTP header that's mandatory for this request is not specified."
+        );
+
+        assert_eq!(
+            azure_error_message("<Error><Code>AuthenticationFailed</Code></Error>"),
+            "AuthenticationFailed"
+        );
+        // Not XML: a short prefix, not a wall of HTML.
+        let html = "<html>".to_string() + &"x".repeat(500);
+        assert_eq!(azure_error_message(&html).len(), 200);
+        assert!(azure_error_message("   ").is_empty());
+    }
+
+    #[test]
     fn a_single_returned_url_is_used_even_when_the_key_differs() {
         let payload = serde_json::json!({
             "download_urls": {"0.json": {"file_url": "https://blob.example/get"}}
@@ -1101,6 +1231,82 @@ mod tests {
         assert_eq!(clock(0.0), "0:00");
         assert_eq!(clock(65.4), "1:05");
         assert_eq!(clock(3661.0), "1:01:01");
+    }
+
+    /// Stand in for Azure Blob: answer 201 only when `x-ms-blob-type` is present, and
+    /// otherwise reply with Azure's own refusal. Serves exactly two requests.
+    fn fake_azure() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { continue };
+                let mut raw = Vec::new();
+                let mut buffer = [0u8; 4096];
+                // Read until the headers are complete; the body is irrelevant here.
+                while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => raw.extend_from_slice(&buffer[..n]),
+                        Err(_) => break,
+                    }
+                }
+                let request = String::from_utf8_lossy(&raw).to_lowercase();
+
+                let response = if request.contains("x-ms-blob-type: blockblob") {
+                    "HTTP/1.1 201 Created\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error>\
+<Code>MissingRequiredHeader</Code><Message>An HTTP header that's mandatory for this \
+request is not specified.\nRequestId:test\nTime:2026-07-26</Message></Error>";
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/xml\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        format!("http://{address}/container/audio.wav?sig=x")
+    }
+
+    #[tokio::test]
+    async fn the_blob_type_header_is_what_makes_an_azure_upload_succeed() {
+        // The regression this pins: without the header every long meeting died on
+        // "Sarvam signed upload failed: HTTP 400", with nothing to say why.
+        let dir = std::env::temp_dir().join(format!("sarvam-upload-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("audio.wav");
+        std::fs::write(&file, vec![7u8; 4096]).unwrap();
+
+        let url = fake_azure();
+        let client = super::client().unwrap();
+        let details = SignedUrl {
+            url,
+            headers: Vec::new(),
+        };
+
+        // Recognised as Azure: the header is sent and the upload is accepted.
+        put_file(&client, &details, &file, Some("Azure"))
+            .await
+            .expect("upload with x-ms-blob-type should be accepted");
+
+        // Declared as something else: no header, and the refusal now explains itself.
+        let error = put_file(&client, &details, &file, Some("Google"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 400"), "{error}");
+        assert!(error.contains("MissingRequiredHeader"), "{error}");
+        assert!(error.contains("mandatory"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
