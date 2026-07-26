@@ -1245,16 +1245,40 @@ mod tests {
             for stream in listener.incoming().take(2) {
                 let Ok(mut stream) = stream else { continue };
                 let mut raw = Vec::new();
-                let mut buffer = [0u8; 4096];
-                // Read until the headers are complete; the body is irrelevant here.
-                while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut buffer = [0u8; 8192];
+
+                // Read the headers first.
+                let header_end = loop {
+                    if let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break Some(at + 4);
+                    }
                     match stream.read(&mut buffer) {
-                        Ok(0) => break,
+                        Ok(0) => break None,
                         Ok(n) => raw.extend_from_slice(&buffer[..n]),
-                        Err(_) => break,
+                        Err(_) => break None,
+                    }
+                };
+                let request = String::from_utf8_lossy(&raw).to_lowercase();
+
+                // Then drain the body. Closing a socket with unread data queued makes
+                // Windows send an RST, and the client sees "connection forcibly closed"
+                // instead of the reply — which is a property of the harness, not of the
+                // upload, and it made this test fail only on Windows.
+                if let Some(header_end) = header_end {
+                    let length = request
+                        .split("\r\n")
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut read = raw.len().saturating_sub(header_end);
+                    while read < length {
+                        match stream.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(n) => read += n,
+                            Err(_) => break,
+                        }
                     }
                 }
-                let request = String::from_utf8_lossy(&raw).to_lowercase();
 
                 let response = if request.contains("x-ms-blob-type: blockblob") {
                     "HTTP/1.1 201 Created\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
@@ -1270,6 +1294,8 @@ request is not specified.\nRequestId:test\nTime:2026-07-26</Message></Error>";
                 };
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
+                // Half-close so the client reads the reply before the socket goes away.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
             }
         });
 
