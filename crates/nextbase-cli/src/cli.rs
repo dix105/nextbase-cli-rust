@@ -49,8 +49,12 @@ pub enum WisperCommand {
         #[arg(long)]
         update: bool,
     },
-    /// Pick a transcription provider and store its key
-    Provider,
+    /// Choose the dictation model: `model [name]`, e.g. `model saaras:v3`
+    #[command(alias = "provider")]
+    Model {
+        /// Model or provider name. Omit to choose from a list.
+        name: Option<String>,
+    },
     /// Show the current setup
     Status,
     /// Show configured shortcuts and the keys each platform supports

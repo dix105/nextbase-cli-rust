@@ -362,21 +362,121 @@ pub(crate) async fn ask_provider_key(provider: Provider) -> Result<String> {
     }
 }
 
-pub async fn provider() -> Result<()> {
-    require_interactive("Choosing a provider")?;
+/// Choose which model Wisper dictates with, and store its key.
+///
+/// The provider and the model are chosen together on purpose. Setting the provider alone
+/// used to leave a mismatched model behind — switching from Groq to Sarvam kept
+/// `whisper-large-v3-turbo`, which Sarvam then rejected on every dictation.
+pub async fn provider(name: Option<&str>) -> Result<()> {
+    let config = config::load();
 
-    let labels: Vec<String> = Provider::ALL.iter().map(|p| p.to_string()).collect();
-    let chosen = Select::new("Select provider:", labels)
+    // Named directly, so this is scriptable: `wisper model saaras:v3` or `… sarvam`.
+    if let Some(name) = name {
+        let wanted = name.trim().to_lowercase();
+        let found = MODEL_OPTIONS.iter().find(|option| {
+            option.model.eq_ignore_ascii_case(&wanted)
+                || option.provider.as_str().eq_ignore_ascii_case(&wanted)
+        });
+        let Some(option) = found else {
+            let names: Vec<String> = MODEL_OPTIONS
+                .iter()
+                .map(|option| format!("{} ({})", option.model, option.provider))
+                .collect();
+            bail!("Unknown model \"{name}\". Available: {}", names.join(", "));
+        };
+        return apply_model(option, &config).await;
+    }
+
+    // Show what is available before asking, so a bare `wisper model` is informative on
+    // its own — and does not simply fail when there is no terminal to prompt in.
+    list_wisper_models(&config);
+
+    if !std::io::stdin().is_terminal() {
+        println!();
+        ui::hint("Set one with: wisper model <name>");
+        return Ok(());
+    }
+
+    println!();
+    let labels: Vec<String> = MODEL_OPTIONS
+        .iter()
+        .map(|option| {
+            let current = config.provider == Some(option.provider)
+                && config.model.as_deref() == Some(option.model);
+            format!(
+                "{}{}",
+                option.label,
+                if current { "  (current)" } else { "" }
+            )
+        })
+        .collect();
+
+    let chosen = Select::new("Dictation model:", labels.clone())
         .prompt()
         .map_err(prompt_error)?;
-    let provider: Provider = chosen.parse()?;
+    let index = labels
+        .iter()
+        .position(|label| *label == chosen)
+        .unwrap_or(0);
+    apply_model(&MODEL_OPTIONS[index], &config).await
+}
 
-    let key = ask_provider_key(provider).await?;
+/// The models Wisper can dictate with, with the current one marked.
+fn list_wisper_models(config: &config::Config) {
+    ui::heading("Dictation models");
+    for option in MODEL_OPTIONS.iter() {
+        let current = config.provider == Some(option.provider)
+            && config.model.as_deref() == Some(option.model);
+        let key = config
+            .key_for(option.provider)
+            .filter(|key| !key.is_empty())
+            .is_some();
+        // The marker goes first so the current choice is findable by scanning one column.
+        ui::info(&format!(
+            "{} {:<24} {:<16} {}",
+            if current { "→" } else { " " },
+            option.model,
+            option.provider.as_str(),
+            if key { "key saved" } else { "no key" }
+        ));
+    }
+    println!();
+    ui::hint("Meetings use their own model. See: nbmeet model");
+}
+
+/// Write the provider, its model and its key together.
+async fn apply_model(option: &config::ModelOption, config: &config::Config) -> Result<()> {
+    let provider = option.provider;
+
+    // Reuse a saved key rather than asking again: the same provider may already be
+    // configured for the other tool.
+    let existing = config
+        .key_for(provider)
+        .filter(|key| !key.is_empty())
+        .map(|key| key.to_string());
+    let key = match existing {
+        Some(key) => {
+            ui::info(&format!("Using the {provider} key already saved."));
+            key
+        }
+        None => ask_provider_key(provider).await?,
+    };
+
+    let model = option.model.to_string();
     config::update(|c| {
         c.provider = Some(provider);
+        // Set together: a provider without its model is the mismatch this fixes.
+        c.model = Some(model.clone());
         c.set_key(provider, key);
     })?;
-    ui::success(&format!("Provider set to {provider}."));
+
+    ui::success(&format!("Dictation now uses {provider} / {model}."));
+    ui::hint("Restart the listener to pick it up: wisper restart");
+    // Said plainly, because the two tools share one config file.
+    ui::hint(&format!(
+        "Meetings are unaffected — they stay on {}. Change that with: nbmeet model",
+        config::load().meeting_model_or_default()
+    ));
     Ok(())
 }
 

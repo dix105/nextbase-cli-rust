@@ -182,6 +182,18 @@
   .notice.plain { border-left-color: var(--rule-strong); background: var(--sunken); }
   .notice strong { font-weight: 600; }
 
+  /* --------------------------------------------------------------- settings */
+  .settings { display: grid; gap: 12px; margin-top: 4px; }
+  @media (min-width: 620px) { .settings.pair { grid-template-columns: 1fr 1fr; } }
+  .setting label { display: block; font-size: 11px; letter-spacing: 0.05em;
+                   text-transform: uppercase; color: var(--ink-faint); margin-bottom: 5px; }
+  .setting select {
+    width: 100%; padding: 8px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--rule-strong); background: var(--paper); color: var(--ink);
+    font: 13px/1.4 var(--mono);
+  }
+  .setting .why { color: var(--ink-faint); font-size: 11px; margin-top: 5px; }
+
   /* ---------------------------------------------------------------- import */
   .import { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
   .import input {
@@ -293,6 +305,7 @@
 
   <!-- ------------------------------------------------------------ Wisper -->
   <section class="panel" id="panel-wisper" role="tabpanel" aria-labelledby="tab-wisper">
+    <div class="card" id="wisper-settings"></div>
     <dl class="facts" id="wisper-facts"></dl>
 
     <div class="toolbar">
@@ -309,6 +322,7 @@
 
   <!-- ----------------------------------------------------------- Meeting -->
   <section class="panel" id="panel-meeting" role="tabpanel" aria-labelledby="tab-meeting" hidden>
+    <div class="card" id="meeting-settings"></div>
     <dl class="facts" id="meeting-facts"></dl>
     <div id="meeting-live"></div>
 
@@ -388,7 +402,62 @@ function fact(label, value, mono) {
     <dd${mono ? ' class="mono"' : ''}>${escapeHtml(value)}</dd></div>`;
 }
 
+const option = (value, label, selected, disabled) =>
+  `<option value="${escapeHtml(value)}"${selected ? ' selected' : ''}${
+    disabled ? ' disabled' : ''}>${escapeHtml(label)}</option>`;
+
+function renderWisperSettings(state) {
+  const models = state.models || [];
+  const current = state.setup?.model;
+  document.getElementById('wisper-settings').innerHTML = `
+    <h2>Dictation model</h2>
+    <p class="lede">What Wisper transcribes your hold-to-talk clips with.</p>
+    <div class="settings">
+      <div class="setting">
+        <label for="wisper-model">Model</label>
+        <select id="wisper-model" data-set="wisper">
+          ${models.map((entry) => option(
+            entry.model,
+            entry.hasKey ? entry.label : `${entry.label} — no key saved`,
+            entry.model === current,
+            !entry.hasKey,
+          )).join('')}
+        </select>
+        <div class="why">Provider and model change together. Meetings are separate —
+          see the Meeting tab.</div>
+      </div>
+    </div>`;
+}
+
+function renderMeetingSettings(setup) {
+  if (!setup) return;
+  document.getElementById('meeting-settings').innerHTML = `
+    <h2>Meeting models</h2>
+    <p class="lede">Independent of Wisper. The API key is shared; the model is not.</p>
+    <div class="settings pair">
+      <div class="setting">
+        <label for="meeting-model">Transcription</label>
+        <select id="meeting-model" data-set="meeting-model">
+          ${(setup.models || []).map((entry) => option(
+            entry.model, entry.label, entry.model === setup.model, false)).join('')}
+        </select>
+        <div class="why">${setup.supportsMode
+          ? 'Has transcribe and codemix modes, so the sample check can compare them.'
+          : 'No mode choice, so the sample check transcribes once instead of comparing two.'}</div>
+      </div>
+      <div class="setting">
+        <label for="meeting-summary">Summary</label>
+        <select id="meeting-summary" data-set="meeting-summary">
+          ${(setup.summaryModels || []).map((model) => option(
+            model, model, model === setup.summaryModel, false)).join('')}
+        </select>
+        <div class="why">Groq chat model that writes the notes and action items.</div>
+      </div>
+    </div>`;
+}
+
 function renderWisper(state) {
+  renderWisperSettings(state);
   const setup = state.setup || {};
   document.getElementById('wisper-facts').innerHTML = [
     fact('Provider', setup.provider || 'not set'),
@@ -524,6 +593,7 @@ function renderMeetingFacts(setup) {
 
 function renderMeeting(meeting) {
   renderMeetingFacts(meeting.setup);
+  renderMeetingSettings(meeting.setup);
   const host = document.getElementById('meeting-live');
   const badge = document.getElementById('meeting-badge');
 
@@ -664,6 +734,8 @@ async function refreshMeeting() {
   lastMeeting = await getJson('/api/meeting');
   // A redraw mid-upload would drop the file input's state and the progress bar.
   if (uploadPercent != null) return;
+  // Nor while a dropdown is open: redrawing would close it under the pointer.
+  if (document.activeElement?.tagName === 'SELECT') return;
   // Keep whatever is being typed: this redraws every second while recording.
   const field = document.getElementById('import-source');
   if (field) importDraft = field.value;
@@ -742,8 +814,32 @@ async function sendFile(file) {
   await refresh();
 }
 
-document.addEventListener('change', (event) => {
-  if (event.target.id === 'file-input') sendFile(event.target.files[0]);
+document.addEventListener('change', async (event) => {
+  if (event.target.id === 'file-input') {
+    sendFile(event.target.files[0]);
+    return;
+  }
+
+  const target = event.target.dataset?.set;
+  if (!target) return;
+  event.target.disabled = true;
+  try {
+    if (target === 'wisper') {
+      const result = await post('/api/wisper/model', { model: event.target.value });
+      if (result.restartRequired) {
+        // The listener reads config once, at startup.
+        alert(`Dictation now uses ${result.provider} / ${result.model}.\n\nRun "wisper restart" to pick it up.`);
+      }
+    } else if (target === 'meeting-model') {
+      await post('/api/meeting/model', { model: event.target.value });
+    } else if (target === 'meeting-summary') {
+      await post('/api/meeting/model', { summaryModel: event.target.value });
+    }
+  } catch (error) {
+    alert(error.message);
+  }
+  event.target.disabled = false;
+  await refresh();
 });
 
 // Drag and drop over the whole zone, not just the button.

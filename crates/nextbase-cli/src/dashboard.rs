@@ -33,6 +33,12 @@ async fn state() -> impl IntoResponse {
             "spellShortcut": config.spell_shortcut_or_default(),
             "autoPolish": config.auto_polish.unwrap_or(false),
         },
+        "models": config::MODEL_OPTIONS.iter().map(|option| json!({
+            "label": option.label,
+            "model": option.model,
+            "provider": option.provider.as_str(),
+            "hasKey": config.key_for(option.provider).map(|key| !key.is_empty()).unwrap_or(false),
+        })).collect::<Vec<_>>(),
         "listeners": process_state::other_listener_pids().len(),
         "history": storage::load_history(),
     }))
@@ -54,6 +60,13 @@ async fn meeting() -> impl IntoResponse {
     let setup = json!({
         "model": settings.meeting_model_or_default(),
         "summaryModel": settings.meeting_summary_model_or_default(),
+        "supportsMode": settings.meeting_model_supports_mode(),
+        "models": config::MEETING_MODEL_OPTIONS.iter().map(|option| json!({
+            "label": option.label,
+            "model": option.model,
+            "supportsMode": option.supports_mode,
+        })).collect::<Vec<_>>(),
+        "summaryModels": config::SUMMARY_MODEL_OPTIONS,
         "gate": settings.meeting_gate_enabled(),
         "mode": settings.meeting_mode,
         "hasKey": settings.key_for(Provider::Sarvam).map(|key| !key.is_empty()).unwrap_or(false),
@@ -400,6 +413,100 @@ async fn reject_meeting() -> impl IntoResponse {
     }
 }
 
+/// Change which model a tool uses, from the browser.
+///
+/// The two tools are kept apart here exactly as they are in the CLI: this only ever
+/// writes the meeting fields, and `/api/wisper/model` only ever writes Wisper's.
+async fn set_meeting_model(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let model = body.get("model").and_then(|value| value.as_str());
+    let summary = body.get("summaryModel").and_then(|value| value.as_str());
+    if model.is_none() && summary.is_none() {
+        return problem(StatusCode::BAD_REQUEST, "Nothing to change.");
+    }
+
+    if let Some(model) = model {
+        if !config::MEETING_MODEL_OPTIONS
+            .iter()
+            .any(|option| option.model == model)
+        {
+            return problem(StatusCode::BAD_REQUEST, &format!("Unknown model {model}."));
+        }
+    }
+    if let Some(summary) = summary {
+        if !config::SUMMARY_MODEL_OPTIONS.contains(&summary) {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                &format!("Unknown summary model {summary}."),
+            );
+        }
+    }
+
+    let model = model.map(str::to_string);
+    let summary = summary.map(str::to_string);
+    match config::update(|c| {
+        if let Some(model) = model {
+            c.meeting_model = Some(model);
+        }
+        if let Some(summary) = summary {
+            c.meeting_summary_model = Some(summary);
+        }
+    }) {
+        Ok(_) => {
+            let settings = config::load();
+            ok(json!({
+                "model": settings.meeting_model_or_default(),
+                "summaryModel": settings.meeting_summary_model_or_default(),
+                "supportsMode": settings.meeting_model_supports_mode(),
+            }))
+        }
+        Err(error) => problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+/// Change Wisper's dictation model. Provider and model move together, since a provider
+/// with another provider's model configured fails on every dictation.
+async fn set_wisper_model(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let Some(wanted) = body.get("model").and_then(|value| value.as_str()) else {
+        return problem(StatusCode::BAD_REQUEST, "Name a model.");
+    };
+    let Some(option) = config::MODEL_OPTIONS
+        .iter()
+        .find(|option| option.model == wanted)
+    else {
+        return problem(StatusCode::BAD_REQUEST, &format!("Unknown model {wanted}."));
+    };
+
+    // Without a key the change would only surface as a failure at the next dictation.
+    let has_key = config::load()
+        .key_for(option.provider)
+        .map(|key| !key.is_empty())
+        .unwrap_or(false);
+    if !has_key {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "No {} key is saved. Add one first: wisper model {}",
+                option.provider, option.model
+            ),
+        );
+    }
+
+    let provider = option.provider;
+    let model = option.model.to_string();
+    match config::update(|c| {
+        c.provider = Some(provider);
+        c.model = Some(model.clone());
+    }) {
+        Ok(_) => ok(json!({
+            "provider": provider.as_str(),
+            "model": option.model,
+            // The listener reads config once, at startup.
+            "restartRequired": true,
+        })),
+        Err(error) => problem(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
 fn ok(body: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(body))
 }
@@ -425,7 +532,9 @@ pub async fn serve(port: u16) -> Result<String> {
             post(upload_audio).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024 * 1024)),
         )
         .route("/api/meeting/approve/{mode}", post(approve_meeting))
-        .route("/api/meeting/reject", post(reject_meeting));
+        .route("/api/meeting/reject", post(reject_meeting))
+        .route("/api/meeting/model", post(set_meeting_model))
+        .route("/api/wisper/model", post(set_wisper_model));
 
     // Loopback only. This exposes transcript history, so it must never bind 0.0.0.0.
     let address = format!("127.0.0.1:{port}");

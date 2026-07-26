@@ -58,7 +58,9 @@ impl std::fmt::Display for Mode {
 #[derive(Debug, Clone)]
 pub struct BatchOptions {
     pub model: String,
-    pub mode: Mode,
+    /// `None` for a model that does not take one. `mode` is a `saaras:v3` parameter, and
+    /// sending it to a model that does not accept it is an error.
+    pub mode: Option<Mode>,
     /// `unknown` lets Sarvam detect. Only set a specific code when the user has.
     pub language_code: String,
     pub with_diarization: bool,
@@ -70,7 +72,7 @@ impl Default for BatchOptions {
     fn default() -> Self {
         Self {
             model: "saaras:v3".to_string(),
-            mode: Mode::Transcribe,
+            mode: Some(Mode::Transcribe),
             language_code: "unknown".to_string(),
             with_diarization: true,
             with_timestamps: true,
@@ -460,11 +462,15 @@ fn upload_name(path: &Path) -> String {
 fn job_parameters(options: &BatchOptions) -> serde_json::Value {
     let mut parameters = serde_json::json!({
         "model": options.model,
-        "mode": options.mode.as_str(),
         "language_code": options.language_code,
         "with_timestamps": options.with_timestamps,
         "with_diarization": options.with_diarization,
     });
+    // Omitted entirely for a model that has no modes, rather than sent as a default the
+    // API would reject.
+    if let Some(mode) = options.mode {
+        parameters["mode"] = serde_json::json!(mode.as_str());
+    }
     // Only sent when the user actually knows the count; guessing it would bias
     // diarization for no reason.
     if let Some(speakers) = options.num_speakers {
@@ -928,6 +934,23 @@ mod tests {
         assert_eq!(Mode::from_name("code-mix"), Some(Mode::Codemix));
         assert_eq!(Mode::from_name("translate"), None);
         assert_eq!(Mode::Codemix.to_string(), "codemix");
+    }
+
+    #[test]
+    fn a_model_without_modes_sends_no_mode_at_all() {
+        // `mode` belongs to saaras:v3. Sending it with saarika:v2.5 is an error, so it is
+        // omitted rather than defaulted.
+        let body = job_parameters(&BatchOptions {
+            model: "saarika:v2.5".to_string(),
+            mode: None,
+            ..Default::default()
+        });
+        let parameters = body.get("job_parameters").expect("nested object");
+        assert_eq!(parameters["model"], "saarika:v2.5");
+        assert!(parameters.get("mode").is_none());
+        // Diarization and timestamps are not mode-dependent and must still be asked for.
+        assert_eq!(parameters["with_diarization"], true);
+        assert_eq!(parameters["with_timestamps"], true);
     }
 
     #[test]

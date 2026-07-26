@@ -39,12 +39,13 @@ fn sarvam_key(config: &Config) -> Result<&str> {
         .context("Meeting transcription needs a Sarvam API key. Run: nbmeet setup")
 }
 
-fn options(config: &Config, mode: Mode) -> BatchOptions {
+fn options(config: &Config, mode: Option<Mode>) -> BatchOptions {
     BatchOptions {
         // The meeting model, never Wisper's: this tool needs Sarvam Batch, and Wisper's
         // `model` may well be a Groq Whisper name.
         model: config.meeting_model_or_default().to_string(),
-        mode,
+        // Dropped when the chosen model has no modes.
+        mode: mode.filter(|_| config.meeting_model_supports_mode()),
         // Left as detection unless the user pinned a language: guessing narrows the
         // model for no reason on code-mixed speech.
         language_code: "unknown".to_string(),
@@ -59,13 +60,15 @@ async fn sample_job(
     sample: &std::path::Path,
     key: &str,
     config: &Config,
-    mode: Mode,
+    mode: Option<Mode>,
     progress: Progress<'_>,
 ) -> (Mode, Duration, Result<BatchResult>) {
     let started = std::time::Instant::now();
     let files = vec![sample.to_path_buf()];
     let result = sarvam_batch::submit(&files, key, &options(config, mode), progress).await;
-    (mode, started.elapsed(), result)
+    // Reported as `transcribe` when the model has no modes: that is what the job did,
+    // and the label has to name something.
+    (mode.unwrap_or(Mode::Transcribe), started.elapsed(), result)
 }
 
 /// Transcribe a 3-minute sample in both modes and record the findings.
@@ -101,14 +104,21 @@ pub async fn run_sample_gate(
     let sample_info = wav::slice(&audio, &sample_path, window.start, window.length)
         .context("Could not cut the sample from the recording")?;
 
-    // Two jobs, not one: `mode` is a per-job parameter, so a single job cannot
-    // produce both transcriptions. They run concurrently so the gate costs one wait.
-    let (first, second) = tokio::join!(
-        sample_job(&sample_path, key, config, Mode::Transcribe, progress),
-        sample_job(&sample_path, key, config, Mode::Codemix, progress),
-    );
+    // Two jobs, not one: `mode` is a per-job parameter, so a single job cannot produce
+    // both transcriptions. They run concurrently so the gate costs one wait. A model
+    // without modes has nothing to compare, so it gets a single job — still a quality
+    // check, just not an A/B.
+    let runs = if config.meeting_model_supports_mode() {
+        let (first, second) = tokio::join!(
+            sample_job(&sample_path, key, config, Some(Mode::Transcribe), progress),
+            sample_job(&sample_path, key, config, Some(Mode::Codemix), progress),
+        );
+        vec![first, second]
+    } else {
+        vec![sample_job(&sample_path, key, config, None, progress).await]
+    };
 
-    let candidates = [first, second]
+    let candidates = runs
         .into_iter()
         .map(|(mode, elapsed, result)| match result {
             Ok(batch) => {
@@ -212,7 +222,7 @@ pub async fn run_full_transcription(
         ));
     }
 
-    sarvam_batch::submit_with_retry(&parts, key, &options(config, mode), progress).await
+    sarvam_batch::submit_with_retry(&parts, key, &options(config, Some(mode)), progress).await
 }
 
 /// Header facts about the audio, for the deliverables.
@@ -400,16 +410,23 @@ mod tests {
             model: Some("whisper-large-v3-turbo".into()),
             ..Default::default()
         };
-        assert_eq!(options(&config, Mode::Transcribe).model, "saaras:v3");
+        assert_eq!(options(&config, Some(Mode::Transcribe)).model, "saaras:v3");
 
-        config.model = Some("saaras:v3".into());
-        assert_eq!(options(&config, Mode::Codemix).model, "saaras:v3");
-        assert_eq!(options(&config, Mode::Codemix).mode, Mode::Codemix);
+        config.meeting_model = Some("saaras:v3".into());
+        assert_eq!(options(&config, Some(Mode::Codemix)).model, "saaras:v3");
+        assert_eq!(
+            options(&config, Some(Mode::Codemix)).mode,
+            Some(Mode::Codemix)
+        );
+
+        // A model without modes drops it even when the caller asks for one.
+        config.meeting_model = Some("saarika:v2.5".into());
+        assert_eq!(options(&config, Some(Mode::Codemix)).mode, None);
     }
 
     #[test]
     fn language_detection_is_left_on_and_speaker_count_unguessed() {
-        let options = options(&Config::default(), Mode::Transcribe);
+        let options = options(&Config::default(), Some(Mode::Transcribe));
         assert_eq!(options.language_code, "unknown");
         assert_eq!(options.num_speakers, None);
         assert!(options.with_diarization);

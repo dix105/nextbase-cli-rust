@@ -76,6 +76,12 @@ pub enum MeetingCommand {
     /// Open the local dashboard, where a meeting can be started and stopped
     #[command(alias = "app")]
     Open { port: Option<u16> },
+    /// Choose the transcription and summary models: `model [name]`
+    #[command(alias = "provider")]
+    Model {
+        /// Model name to set. Omit to choose from a list.
+        name: Option<String>,
+    },
     /// Require sample approval before each full run: `gate on|off|status`
     Gate {
         #[arg(trailing_var_arg = true)]
@@ -100,6 +106,7 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::History { limit }) => history(limit),
         Some(MeetingCommand::Doctor) => doctor(),
         Some(MeetingCommand::Open { port }) => crate::commands::open(port).await,
+        Some(MeetingCommand::Model { name }) => model(name.as_deref()),
         Some(MeetingCommand::Gate { args }) => gate(&args),
         Some(MeetingCommand::RecordInternal { id }) => recorder::run(&id),
     }
@@ -124,6 +131,7 @@ fn overview() -> Result<()> {
     ui::info("nbmeet doctor     Check microphone, system audio and keys");
     ui::info("nbmeet history    Past meetings");
     ui::info("nbmeet audio <f>  Transcribe a file or URL you already have");
+    ui::info("nbmeet model      Choose the transcription and summary models");
     ui::info("nbmeet open       Dashboard, with start and stop buttons");
     println!();
     ui::hint("Full list: nbmeet --help");
@@ -154,9 +162,6 @@ async fn setup() -> Result<()> {
             // model is not: `model` belongs to Wisper, and writing it here would change
             // what dictation uses.
             c.set_key(Provider::Sarvam, key);
-            if c.meeting_model.is_none() {
-                c.meeting_model = Some(config::DEFAULT_MEETING_MODEL.to_string());
-            }
         })?;
         ui::success("Sarvam key saved.");
     } else {
@@ -178,6 +183,18 @@ async fn setup() -> Result<()> {
         }
     } else {
         ui::success("Groq summary key already saved.");
+    }
+
+    // Chosen at onboarding rather than assumed, and changeable later with
+    // `nbmeet model`.
+    println!();
+    if config::load().meeting_model.is_none() {
+        model(None)?;
+    } else {
+        ui::success(&format!(
+            "Meeting model: {} (change it with: nbmeet model)",
+            config::load().meeting_model_or_default()
+        ));
     }
 
     println!();
@@ -1025,6 +1042,150 @@ fn report_probe(probe: &capture::SourceProbe) {
     } else {
         ui::warn(&format!("{label}: {source} — opened but heard nothing"));
     }
+}
+
+/// Choose which models meetings use.
+///
+/// Entirely separate from `wisper model`: the two tools share this config file and the
+/// API keys in it, but not their model choices. Wisper wants a fast short-clip model;
+/// a meeting needs Sarvam Batch for long audio and speaker labels.
+fn model(name: Option<&str>) -> Result<()> {
+    let settings = config::load();
+
+    // Named directly: `nbmeet model saarika:v2.5`.
+    if let Some(name) = name {
+        let wanted = name.trim();
+        let known = config::MEETING_MODEL_OPTIONS
+            .iter()
+            .find(|option| option.model.eq_ignore_ascii_case(wanted));
+        let Some(option) = known else {
+            let names: Vec<&str> = config::MEETING_MODEL_OPTIONS
+                .iter()
+                .map(|option| option.model)
+                .collect();
+            bail!(
+                "Unknown meeting model \"{wanted}\". Available: {}",
+                names.join(", ")
+            );
+        };
+
+        let model = option.model.to_string();
+        config::update(|c| c.meeting_model = Some(model.clone()))?;
+        ui::success(&format!("Meetings will transcribe with {model}."));
+        report_mode_support(option.supports_mode);
+        return Ok(());
+    }
+
+    // A bare `nbmeet model` shows what is available before asking, and stays useful
+    // where there is no terminal to prompt in.
+    list_meeting_models(&settings);
+
+    if !std::io::stdin().is_terminal() {
+        println!();
+        ui::hint("Set one with: nbmeet model <name>");
+        return Ok(());
+    }
+
+    println!();
+    let labels: Vec<String> = config::MEETING_MODEL_OPTIONS
+        .iter()
+        .map(|option| {
+            let current = settings.meeting_model_or_default() == option.model;
+            format!(
+                "{}{}",
+                option.label,
+                if current { "  (current)" } else { "" }
+            )
+        })
+        .collect();
+    let chosen = Select::new("Meeting transcription model:", labels.clone())
+        .prompt()
+        .context("Nothing was changed.")?;
+    let index = labels
+        .iter()
+        .position(|label| *label == chosen)
+        .unwrap_or(0);
+    let option = &config::MEETING_MODEL_OPTIONS[index];
+
+    let summary_labels: Vec<String> = config::SUMMARY_MODEL_OPTIONS
+        .iter()
+        .map(|model| {
+            let current = settings.meeting_summary_model_or_default() == *model;
+            format!("{model}{}", if current { "  (current)" } else { "" })
+        })
+        .collect();
+    let chosen_summary = Select::new("Summary model (Groq):", summary_labels.clone())
+        .prompt()
+        .context("The transcription model was not changed either.")?;
+    let summary_index = summary_labels
+        .iter()
+        .position(|label| *label == chosen_summary)
+        .unwrap_or(0);
+
+    let model = option.model.to_string();
+    let summary = config::SUMMARY_MODEL_OPTIONS[summary_index].to_string();
+    config::update(|c| {
+        c.meeting_model = Some(model.clone());
+        c.meeting_summary_model = Some(summary.clone());
+    })?;
+
+    ui::success(&format!(
+        "Meetings: {model} for audio, {summary} for summaries."
+    ));
+    report_mode_support(option.supports_mode);
+    // Said out loud because one file holds both tools' settings.
+    ui::hint(&format!(
+        "Wisper is unaffected — dictation stays on {}. Change that with: wisper model",
+        config::load().model.as_deref().unwrap_or("its default")
+    ));
+    Ok(())
+}
+
+/// The models meetings can use, with the current ones marked.
+fn list_meeting_models(settings: &config::Config) {
+    let current = settings.meeting_model_or_default();
+    ui::heading("Meeting transcription models");
+    for option in config::MEETING_MODEL_OPTIONS.iter() {
+        ui::info(&format!(
+            "{} {:<16} {}",
+            if option.model == current { "→" } else { " " },
+            option.model,
+            if option.supports_mode {
+                "transcribe / codemix modes"
+            } else {
+                "no mode choice"
+            }
+        ));
+    }
+
+    let summary = settings.meeting_summary_model_or_default();
+    println!();
+    ui::heading("Summary models");
+    for model in config::SUMMARY_MODEL_OPTIONS.iter() {
+        ui::info(&format!(
+            "{} {model}",
+            if *model == summary { "→" } else { " " }
+        ));
+    }
+
+    println!();
+    // Named here as well, because one config file holds both tools' settings.
+    ui::hint(&format!(
+        "Dictation uses its own model: {}. See: wisper model",
+        settings.model.as_deref().unwrap_or("not set")
+    ));
+}
+
+/// Explain what picking a mode-less model costs, rather than letting the gate change
+/// shape without explanation.
+fn report_mode_support(supports_mode: bool) {
+    if supports_mode {
+        return;
+    }
+    ui::warn(
+        "This model has no transcribe/codemix choice, so the sample check cannot compare the two.",
+    );
+    ui::hint("It still transcribes a sample for you to approve — just one, not a pair.");
 }
 
 fn gate(args: &[String]) -> Result<()> {

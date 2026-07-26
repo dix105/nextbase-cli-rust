@@ -108,6 +108,40 @@ pub const MODEL_OPTIONS: [ModelOption; 4] = [
     },
 ];
 
+/// A meeting transcription model, and whether it accepts a `mode`.
+///
+/// Only Sarvam appears here: meetings need the Batch API for long audio and speaker
+/// labels, which no other configured provider offers.
+#[derive(Debug, Clone)]
+pub struct MeetingModelOption {
+    pub label: &'static str,
+    pub model: &'static str,
+    /// `mode` (transcribe/codemix) is a `saaras:v3` parameter. Sending it with a model
+    /// that does not take it is an error, and the sample gate's A/B comparison is
+    /// meaningless without it.
+    pub supports_mode: bool,
+}
+
+pub const MEETING_MODEL_OPTIONS: [MeetingModelOption; 2] = [
+    MeetingModelOption {
+        label: "Sarvam Saaras v3 — diarization, code-mix modes (recommended)",
+        model: "saaras:v3",
+        supports_mode: true,
+    },
+    MeetingModelOption {
+        label: "Sarvam Saarika v2.5 — no transcribe/codemix choice",
+        model: "saarika:v2.5",
+        supports_mode: false,
+    },
+];
+
+/// Groq chat models for meeting summaries.
+pub const SUMMARY_MODEL_OPTIONS: [&str; 3] = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-120b",
+];
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -232,6 +266,21 @@ impl Config {
             .as_deref()
             .filter(|model| !model.is_empty())
             .unwrap_or(DEFAULT_POLISH_MODEL)
+    }
+
+    /// Whether the chosen meeting model accepts a `mode` parameter.
+    ///
+    /// Drives both what is sent to the API and whether the sample gate can compare
+    /// `transcribe` against `codemix` at all.
+    pub fn meeting_model_supports_mode(&self) -> bool {
+        let model = self.meeting_model_or_default();
+        MEETING_MODEL_OPTIONS
+            .iter()
+            .find(|option| option.model == model)
+            // An unrecognised model is assumed to take a mode only if it is a saaras
+            // build, since that is where the parameter lives.
+            .map(|option| option.supports_mode)
+            .unwrap_or_else(|| model.starts_with("saaras"))
     }
 
     /// Whether a sample must be approved before the full transcription runs.
