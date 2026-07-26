@@ -660,6 +660,37 @@ fn signed_url(payload: &serde_json::Value, field: &str, name: &str) -> Option<Si
     Some(SignedUrl { url, headers })
 }
 
+/// The content type to store the uploaded blob as.
+///
+/// Sarvam validates this and *decodes according to it*. Getting it wrong is not a
+/// rejection you would notice: an mp3 stored as something else came back as six noise
+/// fragments with timestamps 4.7x the real duration, and the job still reported
+/// Completed. Every value here is from the list Sarvam's own error message enumerates.
+fn content_type_for(path: &Path) -> &'static str {
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    match extension.as_str() {
+        "wav" | "wave" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/x-m4a",
+        "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        "aiff" | "aif" => "audio/aiff",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
+        "flac" => "audio/flac",
+        "amr" => "audio/amr",
+        "wma" => "audio/x-ms-wma",
+        "webm" => "audio/webm",
+        "pcm" | "raw" => "audio/pcm_s16le",
+        // Accepted by Sarvam, and the honest answer when the format is unknown.
+        _ => "application/octet-stream",
+    }
+}
+
 /// Whether a signed URL points at Azure Blob Storage.
 ///
 /// Sarvam reports this as `storage_container_type`, but the host is checked too: the
@@ -688,23 +719,31 @@ async fn put_file(
     let bytes =
         std::fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
 
-    let mut request = client.put(&details.url).body(bytes);
+    // Built as a map so each header appears once: setting the same name twice on a
+    // request appends rather than replaces, and two content types is its own failure.
+    let mut headers: Vec<(String, String)> = Vec::new();
 
     // Azure's Put Blob requires `x-ms-blob-type` and answers 400 without it. Sarvam's
     // own examples use the Azure SDK, which sets it for you, which is why their docs
     // never mention it — a raw PUT has to send it itself. Skipping this is what made
     // "Sarvam signed upload failed: HTTP 400" happen on every long meeting.
-    let already_typed = details
-        .headers
-        .iter()
-        .any(|(key, _)| key.eq_ignore_ascii_case("x-ms-blob-type"));
-    if is_azure_blob(&details.url, container) && !already_typed {
-        request = request.header("x-ms-blob-type", "BlockBlob");
+    if is_azure_blob(&details.url, container) {
+        headers.push(("x-ms-blob-type".to_string(), "BlockBlob".to_string()));
+    }
+    headers.push((
+        "content-type".to_string(),
+        content_type_for(path).to_string(),
+    ));
+
+    // Anything the API handed back wins: a signed URL rejects a request whose headers
+    // differ from the ones it was signed with.
+    for (key, value) in &details.headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+        headers.push((key.clone(), value.clone()));
     }
 
-    // Anything the API did hand back is replayed as given: a signed URL rejects a
-    // request whose headers differ from the ones it was signed with.
-    for (key, value) in &details.headers {
+    let mut request = client.put(&details.url).body(bytes);
+    for (key, value) in &headers {
         request = request.header(key.as_str(), value.as_str());
     }
 
@@ -1170,6 +1209,27 @@ mod tests {
         ));
         assert!(!is_azure_blob("http://127.0.0.1/c/f", Some("Local")));
         assert!(!is_azure_blob("https://example.com/upload", None));
+    }
+
+    #[test]
+    fn every_format_uploads_as_a_type_sarvam_accepts() {
+        // Sarvam decodes the blob according to this. An mp3 stored as the wrong type
+        // came back as six noise fragments with impossible timestamps, and the job
+        // still reported Completed — so a wrong value here is silent.
+        assert_eq!(content_type_for(Path::new("a/audio.mp3")), "audio/mpeg");
+        assert_eq!(content_type_for(Path::new("a/audio.wav")), "audio/wav");
+        assert_eq!(content_type_for(Path::new("a/audio.M4A")), "audio/x-m4a");
+        assert_eq!(content_type_for(Path::new("a/audio.flac")), "audio/flac");
+        assert_eq!(content_type_for(Path::new("a/audio.webm")), "audio/webm");
+        // Unknown or absent: the permissive type Sarvam also accepts.
+        assert_eq!(
+            content_type_for(Path::new("a/audio.xyz")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_for(Path::new("a/audio")),
+            "application/octet-stream"
+        );
     }
 
     #[test]
