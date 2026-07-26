@@ -21,8 +21,7 @@ pub const MAX_FILE_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
 /// Documented ceiling for one job.
 pub const MAX_FILES_PER_JOB: usize = 20;
 
-/// How the model should treat the audio. Only these two matter for meetings; the
-/// API also accepts translate, verbatim and translit.
+/// How the model should treat the audio. All five are `saaras:v3` parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -30,20 +29,61 @@ pub enum Mode {
     Transcribe,
     /// Keep Indic speech in Latin script with English technical terms intact.
     Codemix,
+    /// Output English, whatever was spoken.
+    Translate,
+    /// Keep filler words and false starts, for minutes where exact wording matters.
+    Verbatim,
+    /// Transliterate Indic speech into Latin script.
+    Translit,
 }
 
 impl Mode {
+    pub const ALL: [Mode; 5] = [
+        Mode::Transcribe,
+        Mode::Codemix,
+        Mode::Translate,
+        Mode::Verbatim,
+        Mode::Translit,
+    ];
+
+    /// The two the sample gate compares. For Gujarati/Hindi/English speech the choice
+    /// between them is a real judgement call; the other three are explicit requests, so
+    /// there is nothing to weigh them against.
+    pub const COMPARED: [Mode; 2] = [Mode::Transcribe, Mode::Codemix];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Mode::Transcribe => "transcribe",
             Mode::Codemix => "codemix",
+            Mode::Translate => "translate",
+            Mode::Verbatim => "verbatim",
+            Mode::Translit => "translit",
         }
+    }
+
+    /// What choosing this mode gets you, for the pickers to show.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Mode::Transcribe => "the spoken language, as spoken",
+            Mode::Codemix => "Indic speech in Latin script, English terms kept",
+            Mode::Translate => "English output, whatever was spoken",
+            Mode::Verbatim => "filler words and false starts kept",
+            Mode::Translit => "Indic speech transliterated to Latin script",
+        }
+    }
+
+    /// True when the gate has a second mode worth comparing this against.
+    pub fn is_compared(&self) -> bool {
+        Self::COMPARED.contains(self)
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_lowercase().as_str() {
             "transcribe" => Some(Mode::Transcribe),
             "codemix" | "code-mix" | "code_mix" => Some(Mode::Codemix),
+            "translate" => Some(Mode::Translate),
+            "verbatim" => Some(Mode::Verbatim),
+            "translit" | "transliterate" => Some(Mode::Translit),
             _ => None,
         }
     }
@@ -967,12 +1007,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modes_round_trip_through_their_names() {
-        assert_eq!(Mode::from_name("transcribe"), Some(Mode::Transcribe));
+    fn every_mode_round_trips_through_its_name() {
+        for mode in Mode::ALL {
+            assert_eq!(Mode::from_name(mode.as_str()), Some(mode), "{mode}");
+            assert!(!mode.describe().is_empty(), "{mode}");
+        }
         assert_eq!(Mode::from_name("Codemix"), Some(Mode::Codemix));
         assert_eq!(Mode::from_name("code-mix"), Some(Mode::Codemix));
-        assert_eq!(Mode::from_name("translate"), None);
+        assert_eq!(Mode::from_name("transliterate"), Some(Mode::Translit));
+        assert_eq!(Mode::from_name("shout"), None);
         assert_eq!(Mode::Codemix.to_string(), "codemix");
+    }
+
+    #[test]
+    fn only_transcribe_and_codemix_are_worth_comparing() {
+        // The gate exists because that pair is a judgement call for code-mixed speech.
+        // Asking for English output is not a comparison, it is an instruction.
+        assert!(Mode::Transcribe.is_compared());
+        assert!(Mode::Codemix.is_compared());
+        assert!(!Mode::Translate.is_compared());
+        assert!(!Mode::Verbatim.is_compared());
+        assert!(!Mode::Translit.is_compared());
     }
 
     #[test]

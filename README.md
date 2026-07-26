@@ -183,6 +183,27 @@ detection says which language was heard, not whether the words are right.
 
 `nbmeet gate off` skips it and transcribes immediately in the last approved mode.
 
+### Modes
+
+```bash
+nbmeet mode              # list, current one marked
+nbmeet mode translate    # English notes from a Gujarati meeting, no second step
+```
+
+| Mode | Output |
+|---|---|
+| `transcribe` | the spoken language, as spoken |
+| `codemix` | Indic speech in Latin script, English terms kept |
+| `translate` | English, whatever was spoken |
+| `verbatim` | filler words and false starts kept |
+| `translit` | Indic speech transliterated to Latin script |
+
+`transcribe` and `codemix` are the pair the sample gate weighs against each other, because
+for code-mixed speech that is a genuine judgement call. Pinning any of the other three is
+an instruction rather than a question, so the gate checks one sample instead of comparing
+two — and says so when you pick one. All five belong to `saaras:v3`; `saarika:v2.5` takes
+no mode, and `mode` is then omitted from the request rather than sent and rejected.
+
 ### What it will not do
 
 Speaker labels stay generic (`SPEAKER_00`) and are never presented as people. An action

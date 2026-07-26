@@ -104,11 +104,19 @@ pub async fn run_sample_gate(
     let sample_info = wav::slice(&audio, &sample_path, window.start, window.length)
         .context("Could not cut the sample from the recording")?;
 
-    // Two jobs, not one: `mode` is a per-job parameter, so a single job cannot produce
-    // both transcriptions. They run concurrently so the gate costs one wait. A model
-    // without modes has nothing to compare, so it gets a single job — still a quality
-    // check, just not an A/B.
-    let runs = if config.meeting_model_supports_mode() {
+    // The gate compares `transcribe` against `codemix` because for Gujarati/Hindi/English
+    // speech that choice is a real judgement call. A mode pinned to anything else is an
+    // instruction, not a question — it gets one sample to check quality, not a pair. Same
+    // for a model that has no modes at all.
+    let pinned = config
+        .meeting_mode
+        .as_deref()
+        .and_then(Mode::from_name)
+        .filter(|mode| !mode.is_compared());
+
+    let runs = if let Some(mode) = pinned {
+        vec![sample_job(&sample_path, key, config, Some(mode), progress).await]
+    } else if config.meeting_model_supports_mode() {
         let (first, second) = tokio::join!(
             sample_job(&sample_path, key, config, Some(Mode::Transcribe), progress),
             sample_job(&sample_path, key, config, Some(Mode::Codemix), progress),

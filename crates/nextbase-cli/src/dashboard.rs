@@ -67,6 +67,11 @@ async fn meeting() -> impl IntoResponse {
             "supportsMode": option.supports_mode,
         })).collect::<Vec<_>>(),
         "summaryModels": config::SUMMARY_MODEL_OPTIONS,
+        "modes": Mode::ALL.iter().map(|mode| json!({
+            "mode": mode.as_str(),
+            "describe": mode.describe(),
+            "compared": mode.is_compared(),
+        })).collect::<Vec<_>>(),
         "gate": settings.meeting_gate_enabled(),
         "mode": settings.meeting_mode,
         "hasKey": settings.key_for(Provider::Sarvam).map(|key| !key.is_empty()).unwrap_or(false),
@@ -420,7 +425,7 @@ async fn reject_meeting() -> impl IntoResponse {
 async fn set_meeting_model(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let model = body.get("model").and_then(|value| value.as_str());
     let summary = body.get("summaryModel").and_then(|value| value.as_str());
-    if model.is_none() && summary.is_none() {
+    if model.is_none() && summary.is_none() && body.get("mode").is_none() {
         return problem(StatusCode::BAD_REQUEST, "Nothing to change.");
     }
 
@@ -441,14 +446,25 @@ async fn set_meeting_model(Json(body): Json<serde_json::Value>) -> impl IntoResp
         }
     }
 
+    let mode = body.get("mode").and_then(|value| value.as_str());
+    if let Some(mode) = mode {
+        if Mode::from_name(mode).is_none() {
+            return problem(StatusCode::BAD_REQUEST, &format!("Unknown mode {mode}."));
+        }
+    }
+
     let model = model.map(str::to_string);
     let summary = summary.map(str::to_string);
+    let mode = mode.map(str::to_string);
     match config::update(|c| {
         if let Some(model) = model {
             c.meeting_model = Some(model);
         }
         if let Some(summary) = summary {
             c.meeting_summary_model = Some(summary);
+        }
+        if let Some(mode) = mode {
+            c.meeting_mode = Some(mode);
         }
     }) {
         Ok(_) => {

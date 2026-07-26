@@ -446,6 +446,22 @@ function renderMeetingSettings(setup) {
           : 'No mode choice, so the sample check transcribes once instead of comparing two.'}</div>
       </div>
       <div class="setting">
+        <label for="meeting-mode">Mode</label>
+        <select id="meeting-mode" data-set="meeting-mode"${setup.supportsMode ? '' : ' disabled'}>
+          ${(setup.modes || []).map((entry) => option(
+            entry.mode,
+            `${entry.mode} — ${entry.describe}`,
+            entry.mode === setup.mode,
+            false,
+          )).join('')}
+        </select>
+        <div class="why">${!setup.supportsMode
+          ? 'This model takes no mode.'
+          : (setup.modes || []).find((m) => m.mode === setup.mode)?.compared !== false
+            ? 'The sample check compares transcribe against codemix.'
+            : 'Pinned, so the sample check transcribes once instead of comparing a pair.'}</div>
+      </div>
+      <div class="setting">
         <label for="meeting-summary">Summary</label>
         <select id="meeting-summary" data-set="meeting-summary">
           ${(setup.summaryModels || []).map((model) => option(
@@ -587,7 +603,7 @@ function renderMeetingFacts(setup) {
     fact('Summary', setup.summaryModel || 'not set', true),
     fact('Sarvam key', setup.hasKey ? 'saved' : 'missing'),
     fact('Sample gate', setup.gate ? 'on' : 'off'),
-    fact('Last mode', setup.mode || 'none yet', true),
+    fact('Mode', setup.mode || 'not pinned', true),
   ].join('');
 }
 
@@ -834,6 +850,8 @@ document.addEventListener('change', async (event) => {
       await post('/api/meeting/model', { model: event.target.value });
     } else if (target === 'meeting-summary') {
       await post('/api/meeting/model', { summaryModel: event.target.value });
+    } else if (target === 'meeting-mode') {
+      await post('/api/meeting/model', { mode: event.target.value });
     }
   } catch (error) {
     alert(error.message);

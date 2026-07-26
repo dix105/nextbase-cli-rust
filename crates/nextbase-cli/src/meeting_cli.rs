@@ -87,6 +87,11 @@ pub enum MeetingCommand {
         /// Model name to set. Omit to choose from a list.
         name: Option<String>,
     },
+    /// Choose how audio is treated: `mode [transcribe|codemix|translate|verbatim|translit]`
+    Mode {
+        /// Mode to pin. Omit to list them.
+        name: Option<String>,
+    },
     /// Require sample approval before each full run: `gate on|off|status`
     Gate {
         #[arg(trailing_var_arg = true)]
@@ -113,6 +118,7 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::Open { port }) => crate::commands::open(port).await,
         Some(MeetingCommand::Key { name }) => key(name.as_deref()).await,
         Some(MeetingCommand::Model { name }) => model(name.as_deref()),
+        Some(MeetingCommand::Mode { name }) => mode_command(name.as_deref()),
         Some(MeetingCommand::Gate { args }) => gate(&args),
         Some(MeetingCommand::RecordInternal { id }) => recorder::run(&id),
     }
@@ -150,6 +156,7 @@ fn overview() -> Result<()> {
     ui::info("nbmeet history    Past meetings");
     ui::info("nbmeet audio <f>  Transcribe a file or URL you already have");
     ui::info("nbmeet model      Choose the transcription and summary models");
+    ui::info("nbmeet mode       Transcribe, translate, verbatim or transliterate");
     ui::info("nbmeet key        Show or replace the API keys");
     ui::info("nbmeet open       Dashboard, with start and stop buttons");
     println!();
@@ -1029,8 +1036,11 @@ fn doctor() -> Result<()> {
     ui::field("Transcription model", settings.meeting_model_or_default());
     ui::field("Summary model", settings.meeting_summary_model_or_default());
     ui::field(
-        "Last approved mode",
-        settings.meeting_mode.as_deref().unwrap_or("none yet"),
+        "Mode",
+        &match settings.meeting_mode.as_deref().and_then(Mode::from_name) {
+            Some(mode) => format!("{mode} — {}", mode.describe()),
+            None => "not pinned (gate compares transcribe vs codemix)".to_string(),
+        },
     );
     // Named explicitly, because the two tools share this file and it should be obvious
     // that changing one does not move the other.
@@ -1061,6 +1071,68 @@ fn report_probe(probe: &capture::SourceProbe) {
     } else {
         ui::warn(&format!("{label}: {source} — opened but heard nothing"));
     }
+}
+
+/// Pin how the audio is treated, or list the choices.
+///
+/// `transcribe` and `codemix` are what the sample gate weighs against each other, because
+/// for code-mixed speech that is a genuine judgement call. Pinning any of the other three
+/// is an instruction rather than a question, so the gate checks one sample instead of
+/// comparing a pair.
+fn mode_command(name: Option<&str>) -> Result<()> {
+    let settings = config::load();
+    let current = settings.meeting_mode.as_deref().and_then(Mode::from_name);
+
+    if let Some(name) = name {
+        let Some(mode) = Mode::from_name(name) else {
+            let names: Vec<&str> = Mode::ALL.iter().map(|mode| mode.as_str()).collect();
+            bail!("Unknown mode \"{name}\". One of: {}", names.join(", "));
+        };
+        if !settings.meeting_model_supports_mode() {
+            ui::warn(&format!(
+                "{} has no modes, so this will be ignored until the model changes.",
+                settings.meeting_model_or_default()
+            ));
+            ui::hint("Switch with: nbmeet model saaras:v3");
+        }
+
+        config::update(|c| c.meeting_mode = Some(mode.to_string()))?;
+        ui::success(&format!(
+            "Meetings will use `{mode}` — {}.",
+            mode.describe()
+        ));
+        if mode.is_compared() {
+            ui::hint("The sample check will still compare transcribe against codemix.");
+        } else {
+            // Said plainly, because the gate visibly changes shape.
+            ui::hint(
+                "The sample check will transcribe once in this mode rather than compare a pair.",
+            );
+        }
+        return Ok(());
+    }
+
+    ui::heading("Modes");
+    for mode in Mode::ALL {
+        ui::info(&format!(
+            "{} {:<12} {}",
+            if Some(mode) == current { "→" } else { " " },
+            mode.as_str(),
+            mode.describe()
+        ));
+    }
+    println!();
+    if current.is_none() {
+        ui::hint("None pinned: the sample check compares transcribe against codemix.");
+    }
+    ui::hint("Pin one with: nbmeet mode translate");
+    if !settings.meeting_model_supports_mode() {
+        ui::warn(&format!(
+            "{} has no modes, so none of these apply.",
+            settings.meeting_model_or_default()
+        ));
+    }
+    Ok(())
 }
 
 /// Show or replace the two keys meetings need.
