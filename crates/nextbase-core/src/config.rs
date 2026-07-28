@@ -159,6 +159,13 @@ pub struct Config {
     pub spell_shortcut: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
+    /// Standby keys per provider, tried in order when the primary one is spent.
+    ///
+    /// Kept apart from `keys` on purpose: the primary stays a single unambiguous value,
+    /// so `key <provider>` still replaces exactly one thing and nothing that reads
+    /// `key_for` has to learn about a list.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fallback_keys: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +228,63 @@ impl Config {
 
     pub fn set_key(&mut self, provider: Provider, key: impl Into<String>) {
         self.keys.insert(provider.as_str().to_string(), key.into());
+    }
+
+    /// The standby keys for a provider, in the order they should be tried.
+    pub fn fallback_keys_for(&self, provider: Provider) -> &[String] {
+        self.fallback_keys
+            .get(provider.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every key for a provider, primary first, blanks and repeats removed.
+    ///
+    /// Order is the whole point: the primary is what the user chose, and a standby is
+    /// only reached once the one before it has nothing left on it.
+    pub fn keys_for(&self, provider: Provider) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        let candidates = self
+            .key_for(provider)
+            .into_iter()
+            .chain(self.fallback_keys_for(provider).iter().map(String::as_str));
+        for key in candidates {
+            let key = key.trim();
+            if !key.is_empty() && !keys.iter().any(|seen| seen == key) {
+                keys.push(key.to_string());
+            }
+        }
+        keys
+    }
+
+    /// Add a standby key. Returns false when it is blank or already saved.
+    ///
+    /// A duplicate is refused rather than stored: rotating onto the same spent balance
+    /// would cost a second full upload to fail the same way.
+    pub fn add_fallback_key(&mut self, provider: Provider, key: impl Into<String>) -> bool {
+        let key = key.into().trim().to_string();
+        if key.is_empty() || self.keys_for(provider).contains(&key) {
+            return false;
+        }
+        self.fallback_keys
+            .entry(provider.as_str().to_string())
+            .or_default()
+            .push(key);
+        true
+    }
+
+    /// Drop the standby key at `index`, counting from 1 as the CLI displays them.
+    pub fn remove_fallback_key(&mut self, provider: Provider, position: usize) -> Option<String> {
+        let list = self.fallback_keys.get_mut(provider.as_str())?;
+        let index = position.checked_sub(1)?;
+        if index >= list.len() {
+            return None;
+        }
+        let removed = list.remove(index);
+        if list.is_empty() {
+            self.fallback_keys.remove(provider.as_str());
+        }
+        Some(removed)
     }
 
     pub fn shortcut_or_default(&self) -> &str {
@@ -389,5 +453,92 @@ mod tests {
     fn absent_settings_are_not_written_as_null() {
         let written = serde_json::to_string(&Config::default()).unwrap();
         assert_eq!(written, "{}");
+    }
+
+    #[test]
+    fn keys_are_tried_primary_first_then_standbys_in_order() {
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "primary");
+        assert!(config.add_fallback_key(Provider::Sarvam, "second"));
+        assert!(config.add_fallback_key(Provider::Sarvam, "third"));
+
+        assert_eq!(
+            config.keys_for(Provider::Sarvam),
+            vec!["primary", "second", "third"]
+        );
+        // The primary is still one unambiguous value; nothing that reads it changed.
+        assert_eq!(config.key_for(Provider::Sarvam), Some("primary"));
+    }
+
+    #[test]
+    fn a_duplicate_or_blank_standby_key_is_refused() {
+        // Rotating onto a key already in the list means a second full upload against a
+        // balance that was already spent.
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "primary");
+
+        assert!(!config.add_fallback_key(Provider::Sarvam, "primary"));
+        assert!(!config.add_fallback_key(Provider::Sarvam, "   "));
+        assert!(config.add_fallback_key(Provider::Sarvam, " second "));
+        // Stored trimmed, so the same key pasted with a stray space is still a duplicate.
+        assert!(!config.add_fallback_key(Provider::Sarvam, "second"));
+        assert_eq!(config.keys_for(Provider::Sarvam), vec!["primary", "second"]);
+    }
+
+    #[test]
+    fn replacing_the_primary_key_leaves_the_standbys_alone() {
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "old");
+        config.add_fallback_key(Provider::Sarvam, "standby");
+
+        config.set_key(Provider::Sarvam, "new");
+        assert_eq!(config.keys_for(Provider::Sarvam), vec!["new", "standby"]);
+    }
+
+    #[test]
+    fn standby_keys_are_removed_by_the_position_the_cli_shows() {
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "primary");
+        config.add_fallback_key(Provider::Sarvam, "second");
+        config.add_fallback_key(Provider::Sarvam, "third");
+
+        assert_eq!(
+            config.remove_fallback_key(Provider::Sarvam, 1).as_deref(),
+            Some("second")
+        );
+        assert_eq!(config.keys_for(Provider::Sarvam), vec!["primary", "third"]);
+        // Out of range and zero are refused rather than removing something else.
+        assert_eq!(config.remove_fallback_key(Provider::Sarvam, 0), None);
+        assert_eq!(config.remove_fallback_key(Provider::Sarvam, 9), None);
+        // Emptying the list drops the entry, so config.json does not keep a husk.
+        assert_eq!(
+            config.remove_fallback_key(Provider::Sarvam, 1).as_deref(),
+            Some("third")
+        );
+        assert!(config.fallback_keys.is_empty());
+    }
+
+    #[test]
+    fn keys_for_a_provider_with_nothing_saved_is_empty_not_a_blank_key() {
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "");
+        assert!(config.keys_for(Provider::Sarvam).is_empty());
+        assert!(config.keys_for(Provider::Groq).is_empty());
+    }
+
+    #[test]
+    fn standby_keys_round_trip_as_camel_case_and_stay_absent_when_unused() {
+        let mut config = Config::default();
+        config.set_key(Provider::Sarvam, "primary");
+        config.add_fallback_key(Provider::Sarvam, "second");
+
+        let written = serde_json::to_string(&config).unwrap();
+        assert!(written.contains("fallbackKeys"), "{written}");
+        let back: Config = serde_json::from_str(&written).unwrap();
+        assert_eq!(back.keys_for(Provider::Sarvam), vec!["primary", "second"]);
+
+        // A config that never used them must not grow the field.
+        let plain = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!plain.contains("fallbackKeys"), "{plain}");
     }
 }

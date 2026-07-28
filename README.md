@@ -147,8 +147,32 @@ The dashboard has the same field, and takes either a local path or a URL.
 
 Four files land in `~/.nextbase/meetings/<id>/`: `meeting-note.md`,
 `full-diarized-transcript.md`, `full-transcript.txt` and `processing-metadata.json`.
+The two transcript files are written **before** the summary is attempted, so a crash
+while Groq is working cannot cost you a transcription Sarvam has already been paid for.
 Config and API keys are shared with Wisper, so a Sarvam key saved by either tool works
 in both.
+
+### More than one Sarvam key
+
+Batch bills per job, and a key that runs out of credit part-way through would otherwise
+strand the recording.
+
+```bash
+nbmeet key sarvam --add        # save a standby key
+nbmeet key                     # how many are saved, and in what order
+nbmeet key sarvam --remove 1   # drop one
+```
+
+Keys are tried in order and only moved past when the key itself is the problem — an
+empty balance, or one that is rejected outright. A rate limit is waited out on the same
+key first, honouring `Retry-After` up to two minutes. Anything else fails immediately,
+because every key would fail it the same way.
+
+Nothing here can interrupt a recording: the network is only touched after `stop`. But a
+job belongs to the account that created it, so rotating past the upload step means a new
+job and the **same audio uploaded again** — announced when it happens. If every key is
+spent, the recording is kept and `nbmeet process` picks it up; the model is never
+downgraded behind your back to get a transcript out.
 
 ### It records both sides
 
@@ -215,6 +239,19 @@ source of truth.
 A failure never costs the recording. Anything that goes wrong after `stop` rolls back
 to "recorded" and tells you to run `nbmeet process`; a Groq failure still delivers the
 transcript without a summary.
+
+And a failure never costs the same money twice. The moment the words come back they are
+written to disk — as the two transcript files, and as a `resume-transcript.json` record
+next to them. `nbmeet process` finds that record and goes straight to the summary, so a
+run interrupted between transcription and notes is finished for free rather than
+re-uploading audio Sarvam has already been paid to transcribe. The record is deleted once
+the four deliverables exist, so it is only ever on disk while a meeting is half-finished;
+`nbmeet status` and `nbmeet history` both say when one is waiting. To throw it away and
+transcribe from the audio again — a new job, and a new bill:
+
+```bash
+nbmeet process --fresh
+```
 
 ## Layout
 

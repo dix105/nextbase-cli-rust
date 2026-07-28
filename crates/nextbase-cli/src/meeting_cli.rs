@@ -68,6 +68,10 @@ pub enum MeetingCommand {
     Process {
         /// Meeting id. Omit for the most recent unfinished one.
         id: Option<String>,
+        /// Transcribe again from the audio instead of reusing a saved transcript.
+        /// Costs another Sarvam job.
+        #[arg(long)]
+        fresh: bool,
     },
     /// List past meetings
     History { limit: Option<usize> },
@@ -80,6 +84,13 @@ pub enum MeetingCommand {
     Key {
         /// Which key to set. Omit to list them.
         name: Option<String>,
+        /// Add a standby key instead of replacing the primary one. Sarvam only:
+        /// transcription moves to the next key when one runs out of credit.
+        #[arg(long)]
+        add: bool,
+        /// Remove standby key <n>, as numbered by `nbmeet key`.
+        #[arg(long, value_name = "n")]
+        remove: Option<usize>,
     },
     /// Choose the transcription and summary models: `model [name]`
     #[command(alias = "provider")]
@@ -112,11 +123,11 @@ pub async fn dispatch(command: Option<MeetingCommand>) -> Result<()> {
         Some(MeetingCommand::Approve { mode }) => approve(mode.as_deref()).await,
         Some(MeetingCommand::Reject) => reject(),
         Some(MeetingCommand::Audio { source }) => audio(&source.join(" ")).await,
-        Some(MeetingCommand::Process { id }) => process(id.as_deref()).await,
+        Some(MeetingCommand::Process { id, fresh }) => process(id.as_deref(), fresh).await,
         Some(MeetingCommand::History { limit }) => history(limit),
         Some(MeetingCommand::Doctor) => doctor(),
         Some(MeetingCommand::Open { port }) => crate::commands::open(port).await,
-        Some(MeetingCommand::Key { name }) => key(name.as_deref()).await,
+        Some(MeetingCommand::Key { name, add, remove }) => key(name.as_deref(), add, remove).await,
         Some(MeetingCommand::Model { name }) => model(name.as_deref()),
         Some(MeetingCommand::Mode { name }) => mode_command(name.as_deref()),
         Some(MeetingCommand::Gate { args }) => gate(&args),
@@ -459,6 +470,20 @@ fn report_progress(message: &str) {
 async fn transcribe_and_finish(meeting: &state::ActiveMeeting) -> Result<()> {
     let settings = config::load();
 
+    // A run that got the words back and then died owes Sarvam nothing more. Checked
+    // before the gate as well as before the full run: sampling a recording that is
+    // already transcribed would be paying to answer a question that is settled.
+    if let Some(saved) = pipeline::saved_transcript(&meeting.directory()) {
+        ui::success(&format!(
+            "This meeting was already transcribed in `{}` mode. Only the summary is missing.",
+            saved.mode
+        ));
+        ui::info("The audio is not uploaded again.");
+        ui::hint("Transcribe it from scratch instead with: nbmeet process --fresh");
+        println!();
+        return finish_saved(meeting).await;
+    }
+
     if let Some(reason) = &meeting.gate_blocked {
         ui::warn(reason);
         ui::hint("Install ffmpeg to enable the sample check for non-WAV files.");
@@ -635,6 +660,22 @@ async fn run_full(meeting: &state::ActiveMeeting, mode: Mode) -> Result<()> {
     let completed = pipeline::finish(meeting, &settings, mode, &report_progress).await;
     bar.finish_and_clear();
 
+    report_completed(completed)
+}
+
+/// Summarise and deliver a transcript an earlier run already paid for.
+async fn finish_saved(meeting: &state::ActiveMeeting) -> Result<()> {
+    let settings = config::load();
+
+    let bar = ui::spinner("Summarising the saved transcript...");
+    let completed = pipeline::finish_saved(meeting, &settings, &report_progress).await;
+    bar.finish_and_clear();
+
+    report_completed(completed)
+}
+
+/// Say what a finished meeting produced — or park it so nothing is lost.
+fn report_completed(completed: Result<pipeline::Completed>) -> Result<()> {
     let completed = match completed {
         Ok(completed) => completed,
         Err(error) => {
@@ -648,6 +689,9 @@ async fn run_full(meeting: &state::ActiveMeeting, mode: Mode) -> Result<()> {
     };
 
     ui::success("Meeting notes are ready.");
+    if completed.reused_transcript {
+        ui::info("The existing transcript was used; nothing was transcribed again.");
+    }
     if completed.partial {
         ui::warn("The transcription job only partly completed; the notes say which parts.");
     }
@@ -786,6 +830,17 @@ fn status() -> Result<()> {
     if let Some(error) = &meeting.error {
         ui::failure(error);
     }
+    // The difference between "owes Sarvam another job" and "owes Groq a summary" is the
+    // difference between a paid retry and a free one, so it belongs in status.
+    if let Some(saved) = pipeline::saved_transcript(&meeting.directory()) {
+        ui::field(
+            "Transcript",
+            &format!(
+                "saved in `{}` mode — finishing costs nothing more",
+                saved.mode
+            ),
+        );
+    }
 
     match meeting.phase {
         Phase::AwaitingApproval => {
@@ -861,10 +916,23 @@ async fn audio(source: &str) -> Result<()> {
     transcribe_and_finish(&meeting).await
 }
 
-async fn process(id: Option<&str>) -> Result<()> {
+/// `--fresh`: throw away a saved transcript so the audio is transcribed again.
+///
+/// Says what it did, because the next job costs money and a silent discard would look
+/// identical to the reuse it was meant to override.
+fn drop_saved_transcript(directory: &std::path::Path) {
+    if pipeline::discard_saved_transcript(directory) {
+        ui::warn("Discarded the saved transcript. This will run a new Sarvam job.");
+    }
+}
+
+async fn process(id: Option<&str>, fresh: bool) -> Result<()> {
     // Prefer the active meeting; otherwise pick up an orphaned recording.
     if let Some(meeting) = state::load() {
         if meeting.phase == Phase::Recorded && id.is_none() {
+            if fresh {
+                drop_saved_transcript(&meeting.directory());
+            }
             return transcribe_and_finish(&meeting).await;
         }
         if meeting.phase == Phase::AwaitingApproval && id.is_none() {
@@ -879,6 +947,10 @@ async fn process(id: Option<&str>) -> Result<()> {
             .next()
             .context("No recorded meeting is waiting to be transcribed.")?,
     };
+
+    if fresh {
+        drop_saved_transcript(&directory);
+    }
 
     let audio = pipeline::recorded_audio(&directory)
         .with_context(|| format!("No audio found in {}", directory.display()))?;
@@ -947,7 +1019,11 @@ fn history(limit: Option<usize>) -> Result<()> {
                     .map(|line| line.trim_start_matches('#').trim().to_string())
             })
             .unwrap_or_else(|| {
-                if directory.join("audio.wav").is_file() {
+                // An unfinished meeting that already holds its transcript is one command
+                // and no money away from done; the old label read as neither.
+                if pipeline::saved_transcript(&directory).is_some() {
+                    "transcribed, notes not written".to_string()
+                } else if directory.join("audio.wav").is_file() {
                     "recorded, not transcribed".to_string()
                 } else {
                     "no notes".to_string()
@@ -966,7 +1042,17 @@ fn doctor() -> Result<()> {
         .key_for(Provider::Sarvam)
         .filter(|key| !key.is_empty());
     match sarvam {
-        Some(_) => ui::success("Sarvam: saved (transcription)"),
+        Some(_) => {
+            ui::success("Sarvam: saved (transcription)");
+            let standby = settings.fallback_keys_for(Provider::Sarvam).len();
+            if standby > 0 {
+                ui::success(&format!(
+                    "Sarvam standby keys: {standby} — used only when a key runs out of credit"
+                ));
+            } else {
+                ui::hint("One key only. A second takes over if the first runs out mid-meeting: nbmeet key sarvam --add");
+            }
+        }
         None => {
             ui::failure("Sarvam: missing — meetings cannot be transcribed");
             ui::hint("Add it: nbmeet setup");
@@ -1140,7 +1226,7 @@ fn mode_command(name: Option<&str>) -> Result<()> {
 /// Only these two, because they are the ones this tool uses — but they are the same
 /// entries Wisper reads, so replacing one changes it for both. Said out loud rather than
 /// left to be discovered.
-async fn key(name: Option<&str>) -> Result<()> {
+async fn key(name: Option<&str>, add: bool, remove: Option<usize>) -> Result<()> {
     let settings = config::load();
 
     let Some(name) = name else {
@@ -1161,8 +1247,24 @@ async fn key(name: Option<&str>) -> Result<()> {
                 if saved { "saved" } else { "not set" }
             ));
         }
+
+        // Never the keys themselves, only how many and in what order: a standby key is
+        // still a secret, and the position is the only part anyone needs to act on.
+        let standby = settings.fallback_keys_for(Provider::Sarvam);
+        if !standby.is_empty() {
+            println!();
+            ui::field("Sarvam standby keys", &standby.len().to_string());
+            for position in 1..=standby.len() {
+                ui::info(&format!(
+                    "  {position}. saved — tried when key {position} runs out of credit"
+                ));
+            }
+            ui::hint("Remove one with: nbmeet key sarvam --remove 1");
+        }
+
         println!();
-        ui::hint("Replace or add one with: nbmeet key sarvam");
+        ui::hint("Replace one with: nbmeet key sarvam");
+        ui::hint("Add a standby key: nbmeet key sarvam --add");
         ui::hint("Shared with Wisper — the models are not.");
         return Ok(());
     };
@@ -1173,6 +1275,55 @@ async fn key(name: Option<&str>) -> Result<()> {
         other => bail!("Meetings use the sarvam and groq keys. Got \"{other}\"."),
     };
 
+    if add && remove.is_some() {
+        bail!("Use one of --add or --remove at a time.");
+    }
+    // Rotation lives in the Batch client, which only transcription uses. Offering
+    // standby Groq keys would promise a fallback that nothing implements.
+    if (add || remove.is_some()) && provider != Provider::Sarvam {
+        bail!("Standby keys are a Sarvam feature; transcription is what rotates between them.");
+    }
+
+    if let Some(position) = remove {
+        // Checked before writing, so a mistyped number does not rewrite config and then
+        // report a removal that never happened.
+        let saved = settings.fallback_keys_for(provider).len();
+        if position == 0 || position > saved {
+            bail!("There is no standby key {position}. {saved} saved. List them with: nbmeet key");
+        }
+        config::update(|c| {
+            c.remove_fallback_key(provider, position);
+        })?;
+        ui::success(&format!(
+            "Standby key {position} removed. {} standby key(s) left.",
+            saved - 1
+        ));
+        return Ok(());
+    }
+
+    if add {
+        if settings
+            .key_for(provider)
+            .filter(|key| !key.is_empty())
+            .is_none()
+        {
+            bail!("Save the main {provider} key first: nbmeet key {provider}");
+        }
+        ui::info("A standby key is used only when the one before it is out of credit.");
+        let key = crate::commands::ask_provider_key(provider).await?;
+        let mut accepted = false;
+        config::update(|c| accepted = c.add_fallback_key(provider, key))?;
+        if !accepted {
+            bail!("That key is already saved for {provider}.");
+        }
+        let total = config::load().keys_for(provider).len();
+        ui::success(&format!(
+            "Standby key saved. {total} {provider} key(s) now."
+        ));
+        ui::hint("They are tried in order, and only when a key has nothing left on it.");
+        return Ok(());
+    }
+
     let had_key = settings
         .key_for(provider)
         .filter(|key| !key.is_empty())
@@ -1181,6 +1332,10 @@ async fn key(name: Option<&str>) -> Result<()> {
         ui::info(&format!(
             "A {provider} key is already saved. Pasting one replaces it."
         ));
+        if !settings.fallback_keys_for(provider).is_empty() {
+            // The standby list is untouched by a replacement, which is not obvious.
+            ui::info("The standby keys are kept. Add one with: --add");
+        }
     }
 
     let key = crate::commands::ask_provider_key(provider).await?;

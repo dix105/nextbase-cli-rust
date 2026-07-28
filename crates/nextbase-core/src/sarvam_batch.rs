@@ -21,6 +21,76 @@ pub const MAX_FILE_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
 /// Documented ceiling for one job.
 pub const MAX_FILES_PER_JOB: usize = 20;
 
+/// How many times a rate-limited request is retried before the key is given up on.
+const RATE_LIMIT_ATTEMPTS: usize = 5;
+/// First pause after a 429. Doubles each attempt.
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(5);
+/// Ceiling on any single pause, including one the server asks for.
+///
+/// A `Retry-After: 3600` is a suggestion, not an instruction worth hanging a CLI on for
+/// an hour — past this, giving up and leaving the audio for `nbmeet process` is better.
+const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(120);
+
+/// A Sarvam call that came back with an error status.
+///
+/// The status is kept rather than flattened into a string because three cases need
+/// telling apart, and only the status separates them: a rate limit (wait, retry the same
+/// key), a key with nothing left on it (move to the next key), and a real error (stop).
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub status: u16,
+    pub message: String,
+    /// From the `Retry-After` header, when the server sent one.
+    pub retry_after: Option<Duration>,
+}
+
+impl ApiError {
+    /// Throttled. The same key will work again after a wait.
+    pub fn is_rate_limited(&self) -> bool {
+        self.status == 429 && !self.is_key_exhausted()
+    }
+
+    /// This key is the problem, so another one may get further.
+    ///
+    /// Sarvam's wording for an exhausted balance is not documented, so this leans on the
+    /// status where it is unambiguous and on the message where it is not. Getting it
+    /// wrong in the generous direction costs one wasted attempt on the next key; getting
+    /// it wrong in the strict direction strands a recording that a second key could have
+    /// transcribed, so the message match is deliberately broad.
+    pub fn is_key_exhausted(&self) -> bool {
+        if matches!(self.status, 401..=403) {
+            return true;
+        }
+        if self.status != 429 {
+            return false;
+        }
+        // A 429 that names credit rather than rate is a spent key wearing a rate
+        // limit's status code; waiting would never clear it.
+        let message = self.message.to_lowercase();
+        [
+            "credit",
+            "balance",
+            "insufficient",
+            "exhausted",
+            "quota",
+            "subscription",
+            "top up",
+            "topup",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only the message: these reach the user, and a bare status code helps nobody.
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 /// How the model should treat the audio. All five are `saaras:v3` parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -423,27 +493,103 @@ fn error_message(payload: &serde_json::Value, status: reqwest::StatusCode, what:
         .unwrap_or_else(|| format!("{what} failed: HTTP {}", status.as_u16()))
 }
 
+/// `Retry-After` in seconds. The HTTP-date form is ignored in favour of the backoff:
+/// parsing it wrong would be worse than not reading it.
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let value = response.headers().get(reqwest::header::RETRY_AFTER)?;
+    let seconds: u64 = value.to_str().ok()?.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+/// Read the body as JSON, or fail with an `ApiError` that still carries the status.
+async fn read_json(response: reqwest::Response, what: &str) -> Result<serde_json::Value> {
+    let status = response.status();
+    let retry_after = retry_after(&response);
+    let payload: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        return Err(ApiError {
+            status: status.as_u16(),
+            message: error_message(&payload, status, what),
+            retry_after,
+        }
+        .into());
+    }
+    Ok(payload)
+}
+
+/// How long to wait before the next attempt.
+///
+/// The server's own `Retry-After` wins when it sent one — it knows when the window
+/// reopens — but it is still capped: an hour-long wait inside a CLI is worse for the user
+/// than failing and leaving the audio for `nbmeet process`.
+fn pause_before_retry(error: &ApiError, backoff: Duration) -> Duration {
+    error
+        .retry_after
+        .unwrap_or(backoff)
+        .min(RATE_LIMIT_BACKOFF_MAX)
+}
+
+/// Retry `attempt` through rate limits, and only through rate limits.
+///
+/// The waiting is announced: a silent two-minute sleep inside a job that already takes
+/// minutes is indistinguishable from the hang this module works hard to never look like.
+async fn with_retry<F, Fut>(
+    what: &str,
+    progress: Progress<'_>,
+    mut attempt: F,
+) -> Result<serde_json::Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value>>,
+{
+    let mut backoff = RATE_LIMIT_BACKOFF;
+    let mut attempts_left = RATE_LIMIT_ATTEMPTS;
+
+    loop {
+        let error = match attempt().await {
+            Ok(payload) => return Ok(payload),
+            Err(error) => error,
+        };
+        attempts_left -= 1;
+
+        // Anything that is not a rate limit — including a spent key, which waiting
+        // would never clear — belongs to the caller to decide about.
+        let Some(api) = error.downcast_ref::<ApiError>() else {
+            return Err(error);
+        };
+        if !api.is_rate_limited() || attempts_left == 0 {
+            return Err(error);
+        }
+
+        let pause = pause_before_retry(api, backoff);
+        progress(&format!(
+            "Sarvam rate-limited the request to {what}. Waiting {}s, then retrying ({attempts_left} attempt(s) left)",
+            pause.as_secs()
+        ));
+        tokio::time::sleep(pause).await;
+        backoff = (backoff * 2).min(RATE_LIMIT_BACKOFF_MAX);
+    }
+}
+
 async fn post_json(
     client: &reqwest::Client,
     url: &str,
     key: &str,
     body: serde_json::Value,
     what: &str,
+    progress: Progress<'_>,
 ) -> Result<serde_json::Value> {
-    let response = client
-        .post(url)
-        .header("api-subscription-key", key)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("Could not reach Sarvam to {what}"))?;
-
-    let status = response.status();
-    let payload: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
-    if !status.is_success() {
-        bail!("{}", error_message(&payload, status, what));
-    }
-    Ok(payload)
+    with_retry(what, progress, || async {
+        let response = client
+            .post(url)
+            .header("api-subscription-key", key)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach Sarvam to {what}"))?;
+        read_json(response, what).await
+    })
+    .await
 }
 
 async fn get_json(
@@ -451,20 +597,18 @@ async fn get_json(
     url: &str,
     key: &str,
     what: &str,
+    progress: Progress<'_>,
 ) -> Result<serde_json::Value> {
-    let response = client
-        .get(url)
-        .header("api-subscription-key", key)
-        .send()
-        .await
-        .with_context(|| format!("Could not reach Sarvam to {what}"))?;
-
-    let status = response.status();
-    let payload: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
-    if !status.is_success() {
-        bail!("{}", error_message(&payload, status, what));
-    }
-    Ok(payload)
+    with_retry(what, progress, || async {
+        let response = client
+            .get(url)
+            .header("api-subscription-key", key)
+            .send()
+            .await
+            .with_context(|| format!("Could not reach Sarvam to {what}"))?;
+        read_json(response, what).await
+    })
+    .await
 }
 
 /// Filename to register with the job. Providers infer the format from it.
@@ -553,6 +697,7 @@ pub async fn submit(
         key,
         job_parameters(options),
         "create the job",
+        progress,
     )
     .await?;
     let job_id = created
@@ -573,6 +718,7 @@ pub async fn submit(
         key,
         serde_json::json!({ "job_id": job_id, "files": names }),
         "request upload URLs",
+        progress,
     )
     .await?;
 
@@ -596,6 +742,7 @@ pub async fn submit(
         key,
         serde_json::json!({}),
         "start the job",
+        progress,
     )
     .await?;
 
@@ -640,6 +787,7 @@ pub async fn submit(
         key,
         serde_json::json!({ "job_id": job_id, "files": output_names }),
         "request download URLs",
+        progress,
     )
     .await?;
 
@@ -648,7 +796,14 @@ pub async fn submit(
         let Some(details) = signed_url(&downloads, "download_urls", name) else {
             continue;
         };
-        let body = get_json(&client, &details.url, key, "download the transcript").await?;
+        let body = get_json(
+            &client,
+            &details.url,
+            key,
+            "download the transcript",
+            progress,
+        )
+        .await?;
         outputs.push(parse_output(&body));
     }
 
@@ -866,6 +1021,7 @@ async fn poll(
             &format!("{BASE}/{job_id}/status"),
             key,
             "check the job status",
+            progress,
         )
         .await?;
 
@@ -955,6 +1111,80 @@ fn failed_input_names(status: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The keys worth trying, in order, with blanks and repeats removed.
+///
+/// A duplicate key would be a second full upload for a balance that was already spent.
+pub fn usable_keys(keys: &[String]) -> Vec<String> {
+    let mut usable: Vec<String> = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        if !key.is_empty() && !usable.iter().any(|seen| seen == key) {
+            usable.push(key.to_string());
+        }
+    }
+    usable
+}
+
+/// Run one job, moving to the next key when the key itself is what failed.
+///
+/// A job belongs to the account that created it: there is no handing a half-finished one
+/// to another key. So rotating past the upload step means a brand new job and the same
+/// audio uploaded again — which is worth saying out loud, because it is the difference
+/// between a minute and ten on a long recording.
+pub async fn submit_with_keys(
+    files: &[PathBuf],
+    keys: &[String],
+    options: &BatchOptions,
+    progress: Progress<'_>,
+) -> Result<BatchResult> {
+    let keys = usable_keys(keys);
+    let total = keys.len();
+    if total == 0 {
+        bail!("No Sarvam API key is saved. Run: nbmeet key sarvam");
+    }
+
+    let mut last: Option<anyhow::Error> = None;
+    for (index, key) in keys.iter().enumerate() {
+        let position = index + 1;
+        if index > 0 {
+            // "Anything already uploaded", not "the audio": a key rejected at job
+            // creation has not uploaded a byte yet, and saying otherwise would have
+            // people bracing for a repeat that is not happening.
+            progress(&format!(
+                "Trying Sarvam key {position} of {total} in a new job — a job cannot move between keys, so anything already uploaded goes again"
+            ));
+        }
+
+        match submit(files, key, options, progress).await {
+            Ok(result) => {
+                if index > 0 {
+                    progress(&format!("Key {position} of {total} completed the job"));
+                }
+                return Ok(result);
+            }
+            Err(error) => {
+                let spent = error
+                    .downcast_ref::<ApiError>()
+                    .map(ApiError::is_key_exhausted)
+                    .unwrap_or(false);
+                // Anything else is a real failure that another key would hit
+                // identically; rotating would just spend the upload twice.
+                if !spent || position == total {
+                    return Err(error);
+                }
+                // Never the key itself, only its position: this goes to the log and the
+                // state file, both of which people paste into bug reports.
+                progress(&format!(
+                    "Sarvam key {position} of {total} cannot be used: {error}"
+                ));
+                last = Some(error);
+            }
+        }
+    }
+
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("No Sarvam API key could run the job.")))
+}
+
 /// Transcribe `files`, retrying only the inputs that failed.
 ///
 /// A failed job id can never be restarted, so a retry means a brand new job over the
@@ -962,11 +1192,11 @@ fn failed_input_names(status: &serde_json::Value) -> Vec<String> {
 /// already succeeded.
 pub async fn submit_with_retry(
     files: &[PathBuf],
-    key: &str,
+    keys: &[String],
     options: &BatchOptions,
     progress: Progress<'_>,
 ) -> Result<BatchResult> {
-    let mut result = submit(files, key, options, progress).await?;
+    let mut result = submit_with_keys(files, keys, options, progress).await?;
     if result.failed_inputs.is_empty() {
         return Ok(result);
     }
@@ -985,7 +1215,7 @@ pub async fn submit_with_retry(
         retry.len()
     ));
 
-    match submit(&retry, key, options, progress).await {
+    match submit_with_keys(&retry, keys, options, progress).await {
         Ok(second) => {
             result.outputs.extend(second.outputs);
             result.failed_inputs = second.failed_inputs;
@@ -1487,5 +1717,112 @@ request is not specified.\nRequestId:test\nTime:2026-07-26</Message></Error>";
             .await
             .unwrap_err();
         assert!(error.to_string().contains("No audio files"), "{error}");
+    }
+
+    fn api_error(status: u16, message: &str) -> ApiError {
+        ApiError {
+            status,
+            message: message.to_string(),
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_is_waited_out_and_a_spent_key_is_not() {
+        // Waiting clears a throttle. It never clears an empty balance, so the two must
+        // not be treated the same even when they arrive with the same status code.
+        assert!(api_error(429, "Rate limit exceeded").is_rate_limited());
+        assert!(!api_error(429, "Rate limit exceeded").is_key_exhausted());
+
+        for message in [
+            "Insufficient credits",
+            "Your account balance is zero",
+            "Monthly quota exhausted",
+            "Please top up to continue",
+            "No active subscription",
+        ] {
+            let error = api_error(429, message);
+            assert!(error.is_key_exhausted(), "{message}");
+            // And so it must not be retried on the same key.
+            assert!(!error.is_rate_limited(), "{message}");
+        }
+    }
+
+    #[test]
+    fn only_key_shaped_failures_move_to_the_next_key() {
+        // Another key may fix an unusable one.
+        assert!(api_error(401, "Invalid API key").is_key_exhausted());
+        assert!(api_error(402, "Payment required").is_key_exhausted());
+        assert!(api_error(403, "Forbidden").is_key_exhausted());
+
+        // These would fail identically on every key, and rotating would spend the
+        // upload again for nothing.
+        assert!(!api_error(400, "Bad request").is_key_exhausted());
+        assert!(!api_error(500, "Internal error").is_key_exhausted());
+        assert!(!api_error(404, "No such job").is_key_exhausted());
+        assert!(!api_error(500, "Internal error").is_rate_limited());
+    }
+
+    #[test]
+    fn an_api_error_shows_the_message_and_not_the_status_code() {
+        // These reach the user, and "HTTP 429" on its own helps nobody.
+        let error: anyhow::Error = api_error(429, "Rate limit exceeded").into();
+        assert_eq!(error.to_string(), "Rate limit exceeded");
+        // But the status survives for the caller that has to classify it.
+        assert_eq!(error.downcast_ref::<ApiError>().unwrap().status, 429);
+    }
+
+    #[test]
+    fn the_key_list_drops_blanks_and_repeats() {
+        // A repeat is a second full upload against a balance already spent.
+        let keys = vec![
+            "  first  ".to_string(),
+            String::new(),
+            "second".to_string(),
+            "first".to_string(),
+            "   ".to_string(),
+        ];
+        assert_eq!(usable_keys(&keys), vec!["first", "second"]);
+        assert!(usable_keys(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn rotation_needs_at_least_one_key_and_says_how_to_add_one() {
+        let files = vec![PathBuf::from("a.wav")];
+        let error = submit_with_keys(&files, &[], &BatchOptions::default(), &|_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("nbmeet key sarvam"), "{error}");
+
+        // A key that is only whitespace is no key at all.
+        let blank = vec!["   ".to_string()];
+        let error = submit_with_keys(&files, &blank, &BatchOptions::default(), &|_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("No Sarvam API key"), "{error}");
+    }
+
+    #[test]
+    fn the_server_sets_the_wait_but_never_an_unreasonable_one() {
+        let mut error = api_error(429, "Rate limit exceeded");
+        let backoff = Duration::from_secs(5);
+
+        // Nothing sent: the caller's own backoff.
+        assert_eq!(pause_before_retry(&error, backoff), backoff);
+
+        // Sent, and reasonable: honoured as asked, even when longer than the backoff.
+        error.retry_after = Some(Duration::from_secs(30));
+        assert_eq!(pause_before_retry(&error, backoff), Duration::from_secs(30));
+
+        // Sent, and absurd: capped. An hour inside a CLI is worse than failing and
+        // leaving the audio for `nbmeet process`.
+        error.retry_after = Some(Duration::from_secs(3600));
+        assert_eq!(pause_before_retry(&error, backoff), RATE_LIMIT_BACKOFF_MAX);
+
+        // The backoff is capped by the same ceiling once it has doubled its way up.
+        assert_eq!(
+            pause_before_retry(&api_error(429, "slow down"), Duration::from_secs(600)),
+            RATE_LIMIT_BACKOFF_MAX
+        );
     }
 }

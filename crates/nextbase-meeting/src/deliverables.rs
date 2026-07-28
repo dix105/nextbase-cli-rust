@@ -151,21 +151,48 @@ struct Metadata {
     trust_reasons: Vec<String>,
 }
 
-/// Write all four files. Returns their paths in a stable order.
-pub fn write(deliverable: &Deliverable<'_>) -> Result<Vec<PathBuf>> {
+fn prepared_directory(deliverable: &Deliverable<'_>) -> Result<PathBuf> {
     let directory = deliverable.meeting.directory();
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("Could not create {}", directory.display()))?;
+    Ok(directory)
+}
+
+/// Write only the files that depend on the transcription, not on the summary.
+///
+/// Split out so the pipeline can put the transcript on disk *before* it calls Groq. A
+/// crash, a Ctrl+C or a machine going to sleep during summarising would otherwise cost
+/// the user a transcription they have already paid Sarvam for, and the only way back is
+/// to submit and pay for the same audio again. Neither file reads `analysis`, so `write`
+/// re-rendering them afterwards produces byte-identical content.
+pub fn write_transcript(deliverable: &Deliverable<'_>) -> Result<Vec<PathBuf>> {
+    let directory = prepared_directory(deliverable)?;
+
+    let diarized = directory.join("full-diarized-transcript.md");
+    let plain = directory.join("full-transcript.txt");
+
+    write_file(&diarized, &render_diarized(deliverable))?;
+    write_file(&plain, &render_plain(deliverable))?;
+
+    Ok(vec![diarized, plain])
+}
+
+/// Write all four files. Returns their paths in a stable order.
+pub fn write(deliverable: &Deliverable<'_>) -> Result<Vec<PathBuf>> {
+    let directory = prepared_directory(deliverable)?;
 
     let note = directory.join("meeting-note.md");
     let diarized = directory.join("full-diarized-transcript.md");
     let plain = directory.join("full-transcript.txt");
     let metadata = directory.join("processing-metadata.json");
 
-    write_file(&note, &render_note(deliverable))?;
     write_file(&diarized, &render_diarized(deliverable))?;
     write_file(&plain, &render_plain(deliverable))?;
     write_file(&metadata, &render_metadata(deliverable)?)?;
+    // Last: `resumable` treats a directory without a note as unfinished, so the note
+    // appearing is what marks the meeting done. Writing it first would hide a meeting
+    // that still had files to write.
+    write_file(&note, &render_note(deliverable))?;
 
     Ok(vec![note, diarized, plain, metadata])
 }
@@ -648,6 +675,52 @@ mod tests {
         assert_eq!(value["trust"], "medium");
         // The field is named as detection, and there is no accuracy field at all.
         assert!(value.get("accuracy").is_none());
+    }
+
+    #[test]
+    fn the_transcript_files_do_not_depend_on_the_summary() {
+        // `write_transcript` runs before Groq is called, and `write` re-renders the same
+        // two files afterwards with the analysis attached. If either file ever read
+        // `analysis`, that second write would silently change a file the user may
+        // already have open — and the early write would stop being the safety net it
+        // exists to be.
+        let meeting = ActiveMeeting::new("meeting-early");
+        let details = transcription(vec![(0.0, 30.0, "one"), (31.0, 60.0, "two")]);
+        let analysis = Analysis {
+            title: "Summarised".into(),
+            summary: "A summary that must not reach the transcript".into(),
+            decisions: vec!["A decision".into()],
+            action_items: vec![],
+            blockers: vec![],
+            open_questions: vec![],
+            language: "mixed".into(),
+        };
+        fn describe<'a>(
+            meeting: &'a ActiveMeeting,
+            details: &'a Transcription,
+            analysis: Option<&'a Analysis>,
+        ) -> Deliverable<'a> {
+            Deliverable {
+                meeting,
+                audio: audio(60.0),
+                transcription: details,
+                analysis,
+                mode: Mode::Codemix,
+                batch_elapsed_seconds: 12.0,
+                job_id: "job-early".into(),
+                partial: false,
+                failed_inputs: vec![],
+            }
+        }
+
+        let without = describe(&meeting, &details, None);
+        let with = describe(&meeting, &details, Some(&analysis));
+
+        assert_eq!(render_diarized(&without), render_diarized(&with));
+        assert_eq!(render_plain(&without), render_plain(&with));
+        // And the note is the file that does carry it, so the two writes are not
+        // interchangeable.
+        assert!(render_note(&with).contains("A decision"));
     }
 
     #[test]
