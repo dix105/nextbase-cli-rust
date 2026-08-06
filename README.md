@@ -84,11 +84,13 @@ there is no path to copy or file picker to navigate. Nothing can award the grant
 programmatically, so this is as direct as macOS allows.
 
 Run from a terminal that already has Accessibility, permission is inherited and
-nothing is asked. A listener started at login is evaluated on its own, so that is
-where the grant actually has to be against the `wisper` binary — and because the
-grant is tied to that exact binary, it has to be given again after an update
-replaces it. Until releases are signed, macOS also quarantines a downloaded
-binary; the installer clears that for you.
+nothing is asked — so `wisper doctor` can look green while a LaunchAgent listener
+still cannot register shortcuts. The grant has to be against the `wisper` binary
+itself (toggle it under Privacy & Security > Accessibility; not only Terminal).
+Because the grant is tied to that exact binary, it has to be given again after an
+update replaces it. The listener now stays up and waits for the grant instead of
+exiting into a KeepAlive restart loop. Until releases are signed, macOS also
+quarantines a downloaded binary; the installer clears that for you.
 
 ### Updating
 

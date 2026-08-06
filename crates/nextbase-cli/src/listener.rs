@@ -56,6 +56,15 @@ enum Job {
     SpellFocusedInput,
 }
 
+/// How often to re-check Accessibility / re-try registration while waiting.
+///
+/// KeepAlive's ThrottleInterval is 10s. Exiting on a failed register used to make
+/// launchd restart us on that cadence forever — a silent crash loop that looked
+/// like "Listener: Not running" in doctor while the log filled with the same four
+/// lines. Staying up and polling is how the grant the user just flipped takes
+/// effect without a manual restart.
+const PERMISSION_POLL: Duration = Duration::from_secs(2);
+
 pub async fn run() -> Result<()> {
     // Last listener wins. Without this, an autostart-revived copy and a manually
     // started one both stay registered and one press fires twice.
@@ -65,6 +74,7 @@ pub async fn run() -> Result<()> {
     }
     process_state::write_pid()?;
 
+    let mut terminate = Terminate::new()?;
     let config = config::load();
     let dictation = config.shortcut_or_default().to_string();
 
@@ -82,17 +92,105 @@ pub async fn run() -> Result<()> {
     ));
     log::log(&format!("Shortcut: {dictation}"));
 
-    if !hotkey::has_permission() {
-        log::log(&format!(
-            "Accessibility permission is missing. {}",
-            hotkey::permission_hint()
-        ));
+    // macOS: a Terminal that already has Accessibility can make interactive
+    // `wisper doctor` report "granted" while this LaunchAgent process still cannot
+    // open an event tap. The grant has to be on *this* binary. Wait for it rather
+    // than exiting — exit + KeepAlive was a 10-second restart loop.
+    if !wait_for_permission(&mut terminate).await? {
+        process_state::clear_pid();
+        return Ok(());
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
 
-    // Registration failures are logged and skipped. One bad shortcut used to throw
-    // and kill the listener, which autostart then restarted in a silent loop.
+    let Some(handles) = register_shortcuts(&config, &dictation, tx.clone()) else {
+        // Permission was true a moment ago but every tap still failed, or every
+        // shortcut clashes. Retry instead of bailing into the KeepAlive loop.
+        log::log(
+            "No shortcuts could be registered yet. Will keep trying. Fix the shortcuts or Accessibility grant, or run: wisper doctor",
+        );
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(PERMISSION_POLL) => {
+                    if !hotkey::has_permission() {
+                        if !wait_for_permission(&mut terminate).await? {
+                            process_state::clear_pid();
+                            return Ok(());
+                        }
+                    }
+                    if let Some(handles) = register_shortcuts(&config, &dictation, tx.clone()) {
+                        return run_event_loop(handles, &mut rx, &mut terminate, &config).await;
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    log::log("Stopping Wisper listener.");
+                    process_state::clear_pid();
+                    return Ok(());
+                }
+                _ = terminate.recv() => {
+                    log::log("Stopping Wisper listener (SIGTERM).");
+                    process_state::clear_pid();
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    run_event_loop(handles, &mut rx, &mut terminate, &config).await
+}
+
+/// Block until macOS trusts this process for global shortcuts, or a stop signal arrives.
+///
+/// Returns `Ok(true)` when trusted, `Ok(false)` when the listener should exit cleanly.
+async fn wait_for_permission(terminate: &mut Terminate) -> Result<bool> {
+    if hotkey::has_permission() {
+        return Ok(true);
+    }
+
+    log::log(&format!(
+        "Accessibility permission is missing. Waiting until it is granted. {}",
+        hotkey::permission_hint()
+    ));
+    // Named so doctor / `wisper logs` can tell "still starting" from "dead".
+    log::log("Listener idle: waiting for Accessibility permission.");
+
+    let mut reminded = false;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(PERMISSION_POLL) => {
+                if hotkey::has_permission() {
+                    log::log("Accessibility permission granted. Registering shortcuts.");
+                    return Ok(true);
+                }
+                // One quieter reminder so a long wait is not a wall of the same line.
+                if !reminded {
+                    log::log(
+                        "Still waiting. In System Settings > Privacy & Security > Accessibility, turn wisper on (not only Terminal), then leave this running — it picks the grant up on its own.",
+                    );
+                    reminded = true;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                log::log("Stopping Wisper listener.");
+                return Ok(false);
+            }
+            _ = terminate.recv() => {
+                log::log("Stopping Wisper listener (SIGTERM).");
+                return Ok(false);
+            }
+        }
+    }
+}
+
+/// Register the three shortcuts. Returns `None` when none of them could be installed.
+///
+/// One bad shortcut is skipped so it cannot take the others down — that used to
+/// kill the whole listener and autostart would restart it in a silent loop.
+fn register_shortcuts(
+    config: &config::Config,
+    dictation: &str,
+    tx: mpsc::UnboundedSender<Job>,
+) -> Option<Vec<Option<hotkey::HotkeyHandle>>> {
     let register = |label: &'static str, value: &str, job: fn(HotkeyEvent) -> Option<Job>| {
         let tx = tx.clone();
         match hotkey::listen(value, move |event| {
@@ -113,9 +211,9 @@ pub async fn run() -> Result<()> {
         }
     };
 
-    let dictation_key = shortcut::normalize(&dictation);
+    let dictation_key = shortcut::normalize(dictation);
     let handles = vec![
-        register("Dictation", &dictation, |event| Some(Job::Dictation(event))),
+        register("Dictation", dictation, |event| Some(Job::Dictation(event))),
         {
             let polish_shortcut = config.polish_shortcut_or_default().to_string();
             let key = shortcut::normalize(&polish_shortcut);
@@ -149,15 +247,22 @@ pub async fn run() -> Result<()> {
     ];
 
     if handles.iter().all(Option::is_none) {
-        process_state::clear_pid();
-        anyhow::bail!("No shortcuts could be registered. Nothing to listen for.");
+        None
+    } else {
+        Some(handles)
     }
+}
 
+async fn run_event_loop(
+    handles: Vec<Option<hotkey::HotkeyHandle>>,
+    rx: &mut mpsc::UnboundedReceiver<Job>,
+    terminate: &mut Terminate,
+    config: &config::Config,
+) -> Result<()> {
     log::log("Hold the shortcut to record, release to transcribe. Ctrl+C stops the listener.");
-    spawn_update_checks(&config);
+    spawn_update_checks(config);
 
     let mut recording: Option<audio::Recording> = None;
-    let mut terminate = Terminate::new()?;
 
     loop {
         let job = tokio::select! {
@@ -192,7 +297,7 @@ pub async fn run() -> Result<()> {
                 if let Err(error) = finish_recording(active).await {
                     log::log(&format!("Error: {error}"));
                 }
-                drain(&mut rx);
+                drain(rx);
             }
             Job::PolishSelection => {
                 if recording.is_some() {
@@ -202,7 +307,7 @@ pub async fn run() -> Result<()> {
                 if let Err(error) = rewrite_selection(polish::RewriteMode::Polish).await {
                     log::log(&format!("Polish error: {error}"));
                 }
-                drain(&mut rx);
+                drain(rx);
             }
             Job::SpellFocusedInput => {
                 if recording.is_some() {
@@ -212,7 +317,7 @@ pub async fn run() -> Result<()> {
                 if let Err(error) = rewrite_focused_input().await {
                     log::log(&format!("Spell-fix error: {error}"));
                 }
-                drain(&mut rx);
+                drain(rx);
             }
         }
     }

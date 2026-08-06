@@ -181,7 +181,9 @@ pub fn permission_is_required() -> bool {
 pub fn permission_hint() -> &'static str {
     if cfg!(target_os = "macos") {
         // Also written to the log, where nothing can prompt, so it names both routes.
-        "Run `wisper doctor` and let it ask macOS for Accessibility permission, or grant it under System Settings > Privacy & Security > Accessibility, then restart the listener."
+        // Call out the Terminal-inheritance trap: doctor can look green while the
+        // LaunchAgent listener still cannot open an event tap.
+        "Grant Accessibility to the wisper binary itself (System Settings > Privacy & Security > Accessibility — not only Terminal). Run `wisper doctor` to open the dialog, toggle wisper off/on, then `wisper restart`."
     } else {
         "Another application may already own this shortcut. Try a different key."
     }

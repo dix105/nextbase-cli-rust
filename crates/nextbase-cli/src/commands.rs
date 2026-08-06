@@ -732,8 +732,13 @@ pub async fn setup(update_mode: bool) -> Result<()> {
 
     // Ask before starting the listener: a listener with no permission registers
     // nothing, and setup is the moment the user is present to answer.
-    if !request_accessibility() {
+    let accessibility_ok = request_accessibility();
+    if !accessibility_ok {
         println!();
+        ui::warn("Accessibility is still missing — the listener will wait for it.");
+        ui::hint(
+            "System Settings > Privacy & Security > Accessibility: turn wisper on (not only Terminal).",
+        );
     }
 
     if config::load().autostart == Some(true) {
@@ -1246,11 +1251,14 @@ pub async fn listen(foreground: bool) -> Result<()> {
 /// Confirm the listener actually came up. A detached process that dies instantly
 /// used to look identical to one that started fine.
 fn report_listener_start() -> Result<()> {
-    std::thread::sleep(std::time::Duration::from_millis(1200));
+    // Permission wait + register can take longer than a quick poll when the user
+    // still has the System Settings pane open. Two seconds is enough to see the
+    // idle marker without making a healthy start feel sluggish.
+    std::thread::sleep(std::time::Duration::from_millis(2000));
     let tail: Vec<String> = log::read_logs()
         .lines()
         .rev()
-        .take(25)
+        .take(40)
         .map(|line| line.to_string())
         .collect();
 
@@ -1259,6 +1267,18 @@ fn report_listener_start() -> Result<()> {
         .any(|line| line.contains("Shortcut registered:"))
     {
         ui::success("Verified: shortcut registered.");
+    } else if tail
+        .iter()
+        .any(|line| line.contains("waiting for Accessibility permission"))
+    {
+        // Not a hard failure: the listener stays up and picks the grant up itself.
+        // The old message ("no shortcut registered") sent people into a restart loop.
+        ui::warn("Listener is running but waiting for Accessibility permission.");
+        ui::hint(
+            "System Settings > Privacy & Security > Accessibility — turn wisper on (not only Terminal).",
+        );
+        ui::hint("Leave it running; it registers the shortcut as soon as the switch is on.");
+        ui::hint("Then check: wisper doctor");
     } else if tail
         .iter()
         .any(|line| line.contains("could not be registered"))
@@ -1385,10 +1405,42 @@ fn request_accessibility() -> bool {
 /// tool's most common failure, and they are invisible from a detached listener.
 pub fn doctor() -> Result<()> {
     let config = config::load();
+    let recent_logs: Vec<String> = log::read_logs()
+        .lines()
+        .rev()
+        .take(80)
+        .map(|line| line.to_string())
+        .collect();
+    let listener_waiting = recent_logs
+        .iter()
+        .any(|line| line.contains("waiting for Accessibility permission"));
+    let listener_denied = recent_logs.iter().any(|line| {
+        line.contains("Accessibility permission is missing")
+            || line.contains("Accessibility permission is required")
+    });
+    let listener_registered = recent_logs
+        .iter()
+        .any(|line| line.contains("Shortcut registered:"));
 
     ui::heading("Permissions");
     if hotkey::has_permission() {
         ui::success("Accessibility: granted (global shortcuts can be registered)");
+        // Terminal that already has Accessibility can make *this* process look
+        // trusted while the LaunchAgent-started listener still cannot open a tap.
+        // That is exactly the Daxit-machine failure mode: doctor green, listener dead.
+        if (listener_waiting || listener_denied) && !listener_registered {
+            ui::warn(
+                "This terminal process is trusted, but the background listener still is not.",
+            );
+            ui::hint(
+                "macOS can inherit Accessibility from Terminal — the login listener cannot.",
+            );
+            ui::hint(
+                "System Settings > Privacy & Security > Accessibility: find wisper, toggle it off then on.",
+            );
+            ui::hint("If it is missing, press +, pick ~/.local/bin/wisper, enable it.");
+            ui::hint("Then: wisper restart");
+        }
     } else {
         ui::failure("Accessibility: missing");
         // Prompting is the fix, so offer it here rather than only naming the pane.
@@ -1466,8 +1518,31 @@ pub fn doctor() -> Result<()> {
     ui::heading("Listener");
     let others = process_state::other_listener_pids();
     match others.len() {
-        0 => ui::info("Not running."),
-        1 => ui::success(&format!("Running (pid {}).", others[0])),
+        0 => {
+            ui::info("Not running.");
+            if config.autostart == Some(true) || autostart::managed() {
+                // Autostart KeepAlive should have kept a process up. Missing means
+                // it is crashing on start (old builds) or was never loaded.
+                ui::warn("Autostart is enabled but no listener is alive.");
+                ui::hint("Start it: wisper listen");
+                ui::hint("If it dies again, check: wisper logs");
+            }
+        }
+        1 => {
+            if listener_waiting && !listener_registered {
+                ui::warn(&format!(
+                    "Running (pid {}) — idle, waiting for Accessibility.",
+                    others[0]
+                ));
+                ui::hint(
+                    "Turn wisper on under Privacy & Security > Accessibility; no restart needed.",
+                );
+            } else if listener_registered {
+                ui::success(&format!("Running (pid {}).", others[0]));
+            } else {
+                ui::success(&format!("Running (pid {}).", others[0]));
+            }
+        }
         n => ui::failure(&format!(
             "{n} listeners running ({others:?}). Every shortcut press fires {n} times. Run: wisper stop"
         )),
